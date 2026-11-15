@@ -539,17 +539,38 @@ async def test_health_check_endpoint():
 
 @pytest.mark.anyio
 async def test_mongo_uri_redaction():
-    """Priority 1: Redacts MongoDB credentials from URIs and exception strings."""
-    secret_pass = "mock_db_secret_pass"
-    raw_uri = f"mongodb+srv://admin_user:{secret_pass}@mock-cluster.mongodb.net/testdb?retryWrites=true"
-    redacted = redact_mongo_uri(raw_uri)
-    assert secret_pass not in redacted
-    assert "admin_user:***@" in redacted
+    """
+    Priority 1: Redacts MongoDB credentials from URIs and exception strings,
+    including passwords containing special characters ('@', ':', URL-encoded '%40'),
+    while preserving hostnames and diagnostic context.
+    """
+    # 1. Password with special characters including '@' and ':'
+    complex_secret = "m0ck!p@ss:w0rd@123"
+    raw_uri_at = f"mongodb+srv://admin_user:{complex_secret}@cluster0.abcde.mongodb.net/testdb?retryWrites=true"
+    redacted_at = redact_mongo_uri(raw_uri_at)
+    assert complex_secret not in redacted_at
+    assert "p@ss" not in redacted_at
+    assert "admin_user:***@cluster0.abcde.mongodb.net" in redacted_at
+    assert "retryWrites=true" in redacted_at
 
-    err_msg = f"Connection failed to {raw_uri} timed out"
+    # 2. URL-encoded password
+    encoded_secret = "p%40ss%3Aword%21"
+    raw_uri_enc = f"mongodb://db_admin:{encoded_secret}@db.internal.net:27017/prod_db"
+    redacted_enc = redact_mongo_uri(raw_uri_enc)
+    assert encoded_secret not in redacted_enc
+    assert "db_admin:***@db.internal.net:27017/prod_db" in redacted_enc
+
+    # 3. Exception string preservation of context
+    err_msg = f"ServerSelectionTimeoutError: connection to {raw_uri_at} timed out after 5000ms"
     redacted_err = redact_mongo_uri(err_msg)
-    assert secret_pass not in redacted_err
-    assert "admin_user:***@" in redacted_err
+    assert complex_secret not in redacted_err
+    assert "ServerSelectionTimeoutError" in redacted_err
+    assert "admin_user:***@cluster0.abcde.mongodb.net" in redacted_err
+    assert "timed out after 5000ms" in redacted_err
+
+    # 4. URI with no credentials left untouched
+    no_cred_uri = "mongodb://localhost:27017/devdb"
+    assert redact_mongo_uri(no_cred_uri) == no_cred_uri
 
 @pytest.mark.anyio
 async def test_email_html_escaping():
@@ -1066,18 +1087,14 @@ async def test_work_update_mutation_concurrency_guard():
         assert r_up.status_code == 201
         update_id = r_up.json()["id"]
 
-        # 2. Create draft report and set status to submitting in db
+        # 2. Lock report to submitting in db (simulating submission starting)
         db = get_database()
         cur_user = await db.users.find_one({"email": email})
-        rep_id = ObjectId()
-        await db.weekly_reports.insert_one({
-            "_id": rep_id,
-            "user_id": str(cur_user["_id"]),
-            "week_start_date": "2026-11-09",
-            "week_end_date": "2026-11-15",
-            "status": "submitting",
-            "answers": []
-        })
+        await db.weekly_reports.update_one(
+            {"user_id": str(cur_user["_id"]), "week_start_date": "2026-11-09"},
+            {"$set": {"status": "submitting", "submission_started_at": datetime.utcnow()}},
+            upsert=True
+        )
 
         # 3. Attempting to add a new update for that week must be rejected
         r_add = await client.post("/api/v1/updates", headers=headers, json={
@@ -1142,3 +1159,128 @@ async def test_manager_team_assignment_and_unassign():
         assert r_reassign.status_code == 200
         emp_reassigned = await db.users.find_one({"_id": emp_doc["_id"]})
         assert emp_reassigned["manager_id"] == mgr_id
+
+@pytest.mark.anyio
+async def test_manager_assignment_conflict_between_two_managers():
+    """Requirement 5: Manager B cannot silently take an employee already assigned to Manager A."""
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        # Manager A (Sarah)
+        r_mgr_a = await client.post("/api/v1/auth/login", json={"email": "manager@company.com", "password": "Manager@123"})
+        h_mgr_a = {"Authorization": f"Bearer {r_mgr_a.json()['access_token']}"}
+        mgr_a_id = r_mgr_a.json()["user"]["id"]
+
+        # Manager B (David)
+        r_mgr_b = await client.post("/api/v1/auth/login", json={"email": "david.manager@company.com", "password": "Manager@123"})
+        h_mgr_b = {"Authorization": f"Bearer {r_mgr_b.json()['access_token']}"}
+        mgr_b_id = r_mgr_b.json()["user"]["id"]
+
+        # Employee assigned to Manager A
+        emp_email = f"shared.emp.{int(datetime.utcnow().timestamp())}@company.com"
+        await client.post("/api/v1/auth/register", json={
+            "name": "Target Employee",
+            "email": emp_email,
+            "password": "Password@123",
+            "role": "employee",
+            "manager_id": mgr_a_id
+        })
+        db = get_database()
+        emp_doc = await db.users.find_one({"email": emp_email})
+        emp_id = str(emp_doc["_id"])
+
+        # Manager B attempts to assign this employee -> 409 Conflict
+        r_steal = await client.post(f"/api/v1/manager/employees/{emp_id}/assign", headers=h_mgr_b)
+        assert r_steal.status_code == 409
+        assert "already assigned to another manager" in r_steal.json()["detail"].lower()
+
+        # Verify employee still belongs to Manager A
+        emp_check = await db.users.find_one({"_id": emp_doc["_id"]})
+        assert emp_check["manager_id"] == mgr_a_id
+
+@pytest.mark.anyio
+async def test_submission_claim_token_ownership_and_stale_takeover():
+    """Requirement 2: Submission claim token prevents late rollbacks from resetting newer active claims."""
+    db = get_database()
+    r_oid = ObjectId()
+    now = datetime.utcnow()
+
+    # Create submitting report with token 1
+    await db.weekly_reports.insert_one({
+        "_id": r_oid,
+        "user_id": "test_owner_user",
+        "week_start_date": "2026-11-09",
+        "week_end_date": "2026-11-15",
+        "status": "submitting",
+        "submission_claim_token": "token_1_stale",
+        "submission_started_at": now - timedelta(seconds=200)
+    })
+
+    # Simulating stale recovery takeover with token 2
+    takeover_res = await db.weekly_reports.find_one_and_update(
+        {
+            "_id": r_oid,
+            "status": "submitting",
+            "submission_claim_token": "token_1_stale"
+        },
+        {
+            "$set": {
+                "submission_claim_token": "token_2_active",
+                "submission_started_at": datetime.utcnow()
+            }
+        },
+        return_document=True
+    )
+    assert takeover_res is not None
+
+    # Now, if an old orphaned process with token 1 tries to roll back:
+    late_rollback = await db.weekly_reports.update_one(
+        {"_id": r_oid, "status": "submitting", "submission_claim_token": "token_1_stale"},
+        {"$set": {"status": "draft"}}
+    )
+    # Late rollback MUST match 0 documents and fail to overwrite
+    assert late_rollback.matched_count == 0
+
+    # Report is still submitting under active token 2
+    cur_doc = await db.weekly_reports.find_one({"_id": r_oid})
+    assert cur_doc["status"] == "submitting"
+    assert cur_doc["submission_claim_token"] == "token_2_active"
+
+@pytest.mark.anyio
+async def test_submission_error_returns_generic_client_safe_message():
+    """Requirement 4: Unexpected exceptions return generic error, redacting internal trace/details."""
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        email = f"safeerr.{int(datetime.utcnow().timestamp())}@company.com"
+        await client.post("/api/v1/auth/register", json={
+            "name": "Safe Err User",
+            "email": email,
+            "password": "Password@123",
+            "role": "employee"
+        })
+        r_emp = await client.post("/api/v1/auth/login", json={"email": email, "password": "Password@123"})
+        h = {"Authorization": f"Bearer {r_emp.json()['access_token']}"}
+
+        # Create draft
+        r_d = await client.post("/api/v1/reports/draft", headers=h, json={
+            "week_start_date": "2026-11-09",
+            "week_end_date": "2026-11-15",
+            "answers": []
+        })
+        rep_id = r_d.json()["id"]
+
+        valid_answers = [
+            {"question_key": "accomplishments", "question_text": "q1", "answer": "A1"},
+            {"question_key": "in_progress", "question_text": "q2", "answer": "A2"},
+            {"question_key": "blockers", "question_text": "q3", "answer": "A3"},
+            {"question_key": "priorities", "question_text": "q4", "answer": "A4"}
+        ]
+
+        # Patch AI generation to raise a sensitive internal database/network exception
+        internal_secret = "InternalDatabaseException: password=super_secret_db_pass"
+        with patch("app.routers.reports.generate_ai_summary_with_retry", side_effect=RuntimeError(internal_secret)):
+            r_sub = await client.post(f"/api/v1/reports/{rep_id}/submit", headers=h, json={"answers": valid_answers})
+            assert r_sub.status_code == 500
+            # Ensure client does NOT see internal exception or passwords
+            assert "super_secret_db_pass" not in r_sub.text
+            assert "InternalDatabaseException" not in r_sub.text
+            assert "An internal error occurred" in r_sub.json()["detail"]

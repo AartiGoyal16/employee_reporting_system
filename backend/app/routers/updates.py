@@ -1,12 +1,119 @@
 from fastapi import APIRouter, HTTPException, status, Depends, Query
 from typing import List, Optional
-from datetime import datetime
+from datetime import datetime, timedelta
 from bson import ObjectId
 from app.database import get_database
 from app.models.update import WorkUpdateCreate, WorkUpdateEdit, WorkUpdateResponse
 from app.auth.dependencies import require_employee
 
 router = APIRouter(prefix="/updates", tags=["Work Updates"])
+
+def get_week_boundaries_for_date(date_str: str) -> tuple[str, str]:
+    """Computes Monday and Sunday calendar dates for any given YYYY-MM-DD date."""
+    dt = datetime.strptime(date_str, "%Y-%m-%d").date()
+    monday = dt - timedelta(days=dt.weekday())
+    sunday = monday + timedelta(days=6)
+    return monday.strftime("%Y-%m-%d"), sunday.strftime("%Y-%m-%d")
+
+async def acquire_draft_report_lease(
+    db,
+    user_id: str,
+    user_dict: dict,
+    week_start: str,
+    week_end: str,
+    add_update_id: Optional[str] = None,
+    remove_update_id: Optional[str] = None
+) -> tuple[bool, str]:
+    """
+    Atomic coordination strategy:
+    Acquires an atomic mutation lease on the weekly report document guaranteeing it is in 'draft' status.
+    If the report is currently 'submitting' or 'submitted', the atomic update matches 0 documents.
+    """
+    now = datetime.utcnow()
+    update_ops = {
+        "$inc": {"mutation_sequence": 1},
+        "$set": {"updated_at": now}
+    }
+    if add_update_id:
+        update_ops["$addToSet"] = {"work_update_ids": add_update_id}
+    if remove_update_id:
+        update_ops["$pull"] = {"work_update_ids": remove_update_id}
+
+    # 1. Atomic lease on existing draft report
+    lease = await db.weekly_reports.find_one_and_update(
+        {
+            "user_id": user_id,
+            "week_start_date": week_start,
+            "week_end_date": week_end,
+            "status": "draft"
+        },
+        update_ops,
+        return_document=True
+    )
+    if lease:
+        return True, "draft"
+
+    # 2. Check if report already exists in non-draft status
+    existing = await db.weekly_reports.find_one({
+        "user_id": user_id,
+        "week_start_date": week_start,
+        "week_end_date": week_end
+    })
+    if existing:
+        return False, existing.get("status", "locked")
+
+    # 3. Report doc does not exist yet -> create draft with lease
+    manager_name = None
+    if user_dict.get("manager_id"):
+        try:
+            m_oid = ObjectId(user_dict["manager_id"])
+        except Exception:
+            m_oid = user_dict["manager_id"]
+        mgr = await db.users.find_one({"_id": m_oid})
+        if mgr:
+            manager_name = mgr.get("name")
+
+    initial_ids = [add_update_id] if add_update_id else []
+    try:
+        await db.weekly_reports.insert_one({
+            "_id": ObjectId(),
+            "user_id": user_id,
+            "user_name": user_dict.get("name"),
+            "user_email": user_dict.get("email"),
+            "manager_id": user_dict.get("manager_id"),
+            "manager_name": manager_name,
+            "week_start_date": week_start,
+            "week_end_date": week_end,
+            "work_update_ids": initial_ids,
+            "answers": [],
+            "status": "draft",
+            "submitted_at": None,
+            "ai_summary": None,
+            "mutation_sequence": 1,
+            "created_at": now,
+            "updated_at": now
+        })
+        return True, "draft"
+    except Exception:
+        # Concurrent insert race: re-check
+        existing = await db.weekly_reports.find_one({
+            "user_id": user_id,
+            "week_start_date": week_start,
+            "week_end_date": week_end
+        })
+        if existing and existing.get("status") in ["submitting", "submitted"]:
+            return False, existing.get("status")
+        lease = await db.weekly_reports.find_one_and_update(
+            {
+                "user_id": user_id,
+                "week_start_date": week_start,
+                "week_end_date": week_end,
+                "status": "draft"
+            },
+            update_ops,
+            return_document=True
+        )
+        return (True, "draft") if lease else (False, "locked")
 
 @router.get("", response_model=List[WorkUpdateResponse])
 async def get_my_work_updates(
@@ -51,26 +158,24 @@ async def create_work_update(
     update_data: WorkUpdateCreate,
     current_user: dict = Depends(require_employee)
 ):
-    """Create a new daily work update."""
+    """Create a new daily work update with atomic weekly report lease coordination."""
     db = get_database()
+    week_start, week_end = get_week_boundaries_for_date(update_data.date)
+    new_oid = ObjectId()
+    now = datetime.utcnow()
 
-    # Integrity check: prevent logging updates for weeks whose reports are submitting or already submitted
-    submitted_report = await db.weekly_reports.find_one({
-        "user_id": current_user["id"],
-        "status": {"$in": ["submitting", "submitted"]},
-        "week_start_date": {"$lte": update_data.date},
-        "week_end_date": {"$gte": update_data.date}
-    })
-    if submitted_report:
-        report_status = submitted_report.get("status", "submitted")
+    # Atomically acquire lease on the weekly report guaranteeing draft status
+    allowed, report_status = await acquire_draft_report_lease(
+        db, current_user["id"], current_user, week_start, week_end, add_update_id=str(new_oid)
+    )
+    if not allowed:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Cannot add work update for {update_data.date}: weekly report for {submitted_report['week_start_date']} to {submitted_report['week_end_date']} is {report_status} and cannot be modified."
+            detail=f"Cannot add work update for {update_data.date}: weekly report for {week_start} to {week_end} is {report_status} and cannot be modified."
         )
 
-    now = datetime.utcnow()
     doc = {
-        "_id": ObjectId(),
+        "_id": new_oid,
         "user_id": current_user["id"],
         "date": update_data.date,
         "title": update_data.title,
@@ -81,21 +186,6 @@ async def create_work_update(
         "updated_at": now
     }
     await db.work_updates.insert_one(doc)
-
-    # Double-check race condition: ensure report was not locked to submitting/submitted during insert
-    race_check = await db.weekly_reports.find_one({
-        "user_id": current_user["id"],
-        "status": {"$in": ["submitting", "submitted"]},
-        "week_start_date": {"$lte": update_data.date},
-        "week_end_date": {"$gte": update_data.date}
-    })
-    if race_check:
-        await db.work_updates.delete_one({"_id": doc["_id"]})
-        report_status = race_check.get("status", "submitted")
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Cannot add work update for {update_data.date}: weekly report is {report_status} and cannot be modified."
-        )
 
     return WorkUpdateResponse(
         id=str(doc["_id"]),
@@ -146,7 +236,7 @@ async def edit_work_update(
     update_data: WorkUpdateEdit,
     current_user: dict = Depends(require_employee)
 ):
-    """Edit an existing daily work update."""
+    """Edit an existing daily work update with atomic weekly report coordination."""
     db = get_database()
     try:
         oid = ObjectId(update_id)
@@ -160,56 +250,49 @@ async def edit_work_update(
     if doc["user_id"] != current_user["id"]:
         raise HTTPException(status_code=403, detail="Forbidden: You can only edit your own work updates")
 
-    # Integrity check: prevent editing updates that are part of a submitting or submitted weekly report
-    submitted_report = await db.weekly_reports.find_one({
-        "user_id": current_user["id"],
-        "status": {"$in": ["submitting", "submitted"]},
-        "week_start_date": {"$lte": doc["date"]},
-        "week_end_date": {"$gte": doc["date"]}
-    })
-    if submitted_report:
-        report_status = submitted_report.get("status", "submitted")
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Cannot edit work update: the weekly report for {submitted_report['week_start_date']} to {submitted_report['week_end_date']} is {report_status} and cannot be modified."
-        )
-
-    # Check target date if date is being modified
     if update_data.date and update_data.date != doc["date"]:
-        submitted_target = await db.weekly_reports.find_one({
-            "user_id": current_user["id"],
-            "status": {"$in": ["submitting", "submitted"]},
-            "week_start_date": {"$lte": update_data.date},
-            "week_end_date": {"$gte": update_data.date}
-        })
-        if submitted_target:
-            report_status = submitted_target.get("status", "submitted")
+        old_start, old_end = get_week_boundaries_for_date(doc["date"])
+        new_start, new_end = get_week_boundaries_for_date(update_data.date)
+
+        # 1. Lease target week first
+        allowed_new, st_new = await acquire_draft_report_lease(
+            db, current_user["id"], current_user, new_start, new_end, add_update_id=str(oid)
+        )
+        if not allowed_new:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Cannot move work update to {update_data.date}: that week's report is {report_status} and cannot be modified."
+                detail=f"Cannot move work update to {update_data.date}: that week's report is {st_new} and cannot be modified."
+            )
+
+        # 2. Lease source week
+        allowed_old, st_old = await acquire_draft_report_lease(
+            db, current_user["id"], current_user, old_start, old_end, remove_update_id=str(oid)
+        )
+        if not allowed_old:
+            # Revert target week addition
+            await db.weekly_reports.update_one(
+                {"user_id": current_user["id"], "week_start_date": new_start},
+                {"$pull": {"work_update_ids": str(oid)}}
+            )
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Cannot move work update from {doc['date']}: source weekly report is {st_old} and cannot be modified."
+            )
+    else:
+        week_start, week_end = get_week_boundaries_for_date(doc["date"])
+        allowed, report_status = await acquire_draft_report_lease(
+            db, current_user["id"], current_user, week_start, week_end
+        )
+        if not allowed:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Cannot edit work update: the weekly report for {week_start} to {week_end} is {report_status} and cannot be modified."
             )
 
     set_fields = {k: v for k, v in update_data.dict().items() if v is not None}
     set_fields["updated_at"] = datetime.utcnow()
 
     await db.work_updates.update_one({"_id": oid}, {"$set": set_fields})
-
-    # Double-check race condition: ensure report was not locked to submitting/submitted during edit
-    race_check = await db.weekly_reports.find_one({
-        "user_id": current_user["id"],
-        "status": {"$in": ["submitting", "submitted"]},
-        "week_start_date": {"$lte": set_fields.get("date", doc["date"])},
-        "week_end_date": {"$gte": set_fields.get("date", doc["date"])}
-    })
-    if race_check:
-        # Roll back edit
-        revert_fields = {k: doc.get(k) for k in set_fields.keys()}
-        await db.work_updates.update_one({"_id": oid}, {"$set": revert_fields})
-        report_status = race_check.get("status", "submitted")
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Cannot edit work update: the weekly report is {report_status} and cannot be modified."
-        )
     updated_doc = await db.work_updates.find_one({"_id": oid})
 
     return WorkUpdateResponse(
@@ -229,7 +312,7 @@ async def delete_work_update(
     update_id: str,
     current_user: dict = Depends(require_employee)
 ):
-    """Delete a daily work update."""
+    """Delete a daily work update with atomic weekly report coordination."""
     db = get_database()
     try:
         oid = ObjectId(update_id)
@@ -243,18 +326,14 @@ async def delete_work_update(
     if doc["user_id"] != current_user["id"]:
         raise HTTPException(status_code=403, detail="Forbidden: You can only delete your own work updates")
 
-    # Integrity check: prevent deleting updates that are part of a submitting or submitted weekly report
-    submitted_report = await db.weekly_reports.find_one({
-        "user_id": current_user["id"],
-        "status": {"$in": ["submitting", "submitted"]},
-        "week_start_date": {"$lte": doc["date"]},
-        "week_end_date": {"$gte": doc["date"]}
-    })
-    if submitted_report:
-        report_status = submitted_report.get("status", "submitted")
+    week_start, week_end = get_week_boundaries_for_date(doc["date"])
+    allowed, report_status = await acquire_draft_report_lease(
+        db, current_user["id"], current_user, week_start, week_end, remove_update_id=str(oid)
+    )
+    if not allowed:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Cannot delete work update: the weekly report for {submitted_report['week_start_date']} to {submitted_report['week_end_date']} is {report_status} and cannot be modified."
+            detail=f"Cannot delete work update: the weekly report for {week_start} to {week_end} is {report_status} and cannot be modified."
         )
 
     await db.work_updates.delete_one({"_id": oid})

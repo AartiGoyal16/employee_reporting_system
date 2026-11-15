@@ -10,13 +10,32 @@ logger = logging.getLogger(__name__)
 def redact_mongo_uri(uri_or_text: str) -> str:
     """
     Redacts password and credentials from MongoDB URI strings or exception messages.
-    Replaces any 'user:pass@' substring with 'user:***@'.
+    Safely handles passwords containing special characters (e.g. '@', ':', URL-encoded '%40'),
+    while preserving hostnames, ports, databases, and diagnostic error context.
     """
     if not uri_or_text:
         return ""
-    # Redact standard URI pattern user:password@
-    redacted = re.sub(r'(mongodb(?:\+srv)?://[^:]+:)([^@]+)(@)', r'\1***\3', str(uri_or_text))
-    return redacted
+
+    def _redact_authority(match):
+        prefix = match.group(1)  # e.g. mongodb:// or mongodb+srv://
+        authority = match.group(2)  # username:password@host[:port]
+        if "@" not in authority:
+            return match.group(0)
+
+        # In MongoDB URIs, the hosts begin strictly after the LAST '@' in the authority component
+        last_at = authority.rfind("@")
+        userinfo = authority[:last_at]
+        hosts = authority[last_at + 1:]
+
+        # Username is separated from password by the FIRST ':' in userinfo
+        if ":" in userinfo:
+            first_colon = userinfo.find(":")
+            username = userinfo[:first_colon]
+            return f"{prefix}{username}:***@{hosts}"
+
+        return f"{prefix}{userinfo}@{hosts}"
+
+    return re.sub(r'(mongodb(?:\+srv)?://)([^\s/\?#]+)', _redact_authority, str(uri_or_text))
 
 class MockCursorWrapper:
     def __init__(self, cursor):

@@ -2,7 +2,14 @@
 Reminder Scheduler — lightweight asyncio background task with atomic database locking.
 Runs periodically, finds employees without a submitted report for the current week,
 and sends a reminder email on REMINDER_DAY (default: Saturday).
-Uses an atomic record in `reminder_logs` to guarantee idempotency across multiple workers/instances.
+Uses an atomic record in `reminder_logs` to guarantee at-least-once delivery with
+concurrency-safe claim locking across multiple workers/instances.
+
+Note on Distributed Delivery Semantics:
+Standard SMTP lacks distributed two-phase commit with databases. If an email is accepted
+by an SMTP relay but the worker process crashes or network disconnects before the database
+record is updated to status 'sent', a subsequent retry cycle may deliver a duplicate email.
+Exactly-once delivery cannot be guaranteed without provider-level idempotency keys.
 """
 import os
 import asyncio

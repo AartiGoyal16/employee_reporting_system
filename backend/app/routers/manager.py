@@ -175,6 +175,10 @@ async def assign_employee(
 ):
     """
     Manager claims / assigns an employee to their team.
+    Enforces authorization in the database update itself:
+    - An employee can only be assigned if unassigned (manager_id is None, "", or missing),
+      or already assigned to this manager.
+    - If already assigned to another manager, returns 409 Conflict.
     """
     db = get_database()
     try:
@@ -182,17 +186,34 @@ async def assign_employee(
     except Exception:
         emp_oid = employee_id
 
-    emp = await db.users.find_one({"_id": emp_oid, "role": "employee"})
-    if not emp:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Employee not found."
-        )
-
-    await db.users.update_one(
-        {"_id": emp_oid},
-        {"$set": {"manager_id": current_user["id"]}}
+    # Atomic conditional update enforcing assignment eligibility
+    updated_emp = await db.users.find_one_and_update(
+        {
+            "_id": emp_oid,
+            "role": "employee",
+            "$or": [
+                {"manager_id": None},
+                {"manager_id": ""},
+                {"manager_id": current_user["id"]},
+                {"manager_id": {"$exists": False}}
+            ]
+        },
+        {"$set": {"manager_id": current_user["id"]}},
+        return_document=True
     )
+
+    if not updated_emp:
+        # Check if employee exists vs already assigned to another manager
+        existing_emp = await db.users.find_one({"_id": emp_oid, "role": "employee"})
+        if not existing_emp:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Employee not found."
+            )
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Employee is already assigned to another manager. They must be unassigned before reassignment."
+        )
 
     # Update draft reports with assigned manager
     await db.weekly_reports.update_many(
@@ -200,4 +221,4 @@ async def assign_employee(
         {"$set": {"manager_id": current_user["id"], "manager_name": current_user["name"]}}
     )
 
-    return {"status": "success", "message": f"Employee {emp['name']} assigned to {current_user['name']}."}
+    return {"status": "success", "message": f"Employee {updated_emp['name']} assigned to {current_user['name']}."}

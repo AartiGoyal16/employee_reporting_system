@@ -44,7 +44,7 @@ async def recover_stale_submitting_reports(db, stale_seconds: int = 120) -> int:
 
     res = await db.weekly_reports.update_many(
         filter_query,
-        {"$set": {"status": "draft", "updated_at": now}}
+        {"$set": {"status": "draft", "updated_at": now}, "$unset": {"submission_claim_token": ""}}
     )
     count = getattr(res, "modified_count", 0)
     if count:

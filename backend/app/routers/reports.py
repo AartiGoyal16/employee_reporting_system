@@ -267,16 +267,27 @@ async def submit_weekly_report(
     5. Dispatches manager notification.
     """
     import os
+    import uuid
+    from app.services.ai_summary import _sanitize_error
+
     db = get_database()
     try:
         r_oid = ObjectId(report_id)
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid report ID format")
 
+    claim_token = str(uuid.uuid4())
+    now = datetime.utcnow()
+
     # Atomic conditional lock: only a draft report owned by current_user can be claimed
     claimed = await db.weekly_reports.find_one_and_update(
         {"_id": r_oid, "user_id": current_user["id"], "status": "draft"},
-        {"$set": {"status": "submitting", "submission_started_at": datetime.utcnow()}}
+        {"$set": {
+            "status": "submitting",
+            "submission_claim_token": claim_token,
+            "submission_started_at": now,
+            "updated_at": now
+        }}
     )
 
     if not claimed:
@@ -294,23 +305,38 @@ async def submit_weekly_report(
         if existing.get("status") == "submitting":
             # Check for stale abandoned submission (> 120 seconds) after server crash
             started_at = existing.get("submission_started_at")
+            started_at_dt = None
             if started_at:
                 if isinstance(started_at, str):
                     try:
-                        started_at = datetime.fromisoformat(started_at)
+                        started_at_dt = datetime.fromisoformat(started_at)
                     except Exception:
-                        started_at = datetime.utcnow()
-                age = (datetime.utcnow() - started_at).total_seconds()
-                if age > 120:
-                    logger.warning(f"Submission {report_id} was stale ({age:.1f}s). Resetting to draft and retrying claim.")
-                    await db.weekly_reports.update_one(
-                        {"_id": r_oid, "status": "submitting"},
-                        {"$set": {"status": "draft"}}
-                    )
-                    claimed = await db.weekly_reports.find_one_and_update(
-                        {"_id": r_oid, "user_id": current_user["id"], "status": "draft"},
-                        {"$set": {"status": "submitting", "submission_started_at": datetime.utcnow()}}
-                    )
+                        started_at_dt = None
+                elif isinstance(started_at, datetime):
+                    started_at_dt = started_at
+
+            age = (datetime.utcnow() - started_at_dt).total_seconds() if started_at_dt else 999
+            if age > 120:
+                logger.warning(f"Submission {report_id} was stale ({age:.1f}s). Attempting atomic takeover with claim {claim_token}.")
+                stale_filter = {
+                    "_id": r_oid,
+                    "user_id": current_user["id"],
+                    "status": "submitting"
+                }
+                if existing.get("submission_claim_token"):
+                    stale_filter["submission_claim_token"] = existing["submission_claim_token"]
+                elif started_at:
+                    stale_filter["submission_started_at"] = started_at
+
+                claimed = await db.weekly_reports.find_one_and_update(
+                    stale_filter,
+                    {"$set": {
+                        "status": "submitting",
+                        "submission_claim_token": claim_token,
+                        "submission_started_at": now,
+                        "updated_at": now
+                    }}
+                )
 
             if not claimed:
                 raise HTTPException(
@@ -322,104 +348,55 @@ async def submit_weekly_report(
 
     report = claimed
 
+    async def _safe_rollback(detail_msg: str, status_code: int = status.HTTP_400_BAD_REQUEST):
+        await db.weekly_reports.update_one(
+            {"_id": r_oid, "status": "submitting", "submission_claim_token": claim_token},
+            {"$set": {"status": "draft", "updated_at": datetime.utcnow()}, "$unset": {"submission_claim_token": ""}}
+        )
+        raise HTTPException(status_code=status_code, detail=detail_msg)
+
     try:
         # 1. Validate legitimate Monday-to-Sunday week
         try:
             start_dt = datetime.strptime(report.get("week_start_date", ""), "%Y-%m-%d")
             end_dt = datetime.strptime(report.get("week_end_date", ""), "%Y-%m-%d")
             if start_dt.weekday() != 0 or end_dt.weekday() != 6 or (end_dt - start_dt).days != 6:
-                await db.weekly_reports.update_one(
-                    {"_id": r_oid, "status": "submitting"},
-                    {"$set": {"status": "draft"}}
-                )
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="Report week must span a legitimate Monday-to-Sunday period (7 days)."
-                )
+                await _safe_rollback("Report week must span a legitimate Monday-to-Sunday period (7 days).")
         except (ValueError, TypeError):
-            await db.weekly_reports.update_one(
-                {"_id": r_oid, "status": "submitting"},
-                {"$set": {"status": "draft"}}
-            )
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Invalid report week start or end date format."
-            )
+            await _safe_rollback("Invalid report week start or end date format.")
 
         # 2. Extract and validate answers
         answers = [a.dict() for a in submit_payload.answers] if (submit_payload and submit_payload.answers is not None) else report.get("answers", [])
         REQUIRED_KEYS = {"accomplishments", "in_progress", "blockers", "priorities"}
 
         if not answers:
-            await db.weekly_reports.update_one(
-                {"_id": r_oid, "status": "submitting"},
-                {"$set": {"status": "draft"}}
-            )
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="All 4 weekly reflection questions must be answered before submitting."
-            )
+            await _safe_rollback("All 4 weekly reflection questions must be answered before submitting.")
 
         keys = [a.get("question_key") for a in answers]
 
         # Check duplicates
         if len(keys) != len(set(keys)):
-            await db.weekly_reports.update_one(
-                {"_id": r_oid, "status": "submitting"},
-                {"$set": {"status": "draft"}}
-            )
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Duplicate question keys found in report answers."
-            )
+            await _safe_rollback("Duplicate question keys found in report answers.")
 
         # Check count of distinct answers
         if len(keys) != 4:
-            await db.weekly_reports.update_one(
-                {"_id": r_oid, "status": "submitting"},
-                {"$set": {"status": "draft"}}
-            )
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Report submission requires exactly 4 distinct weekly questions (received {len(keys)})."
-            )
+            await _safe_rollback(f"Report submission requires exactly 4 distinct weekly questions (received {len(keys)}).")
 
         # Check unknown keys
         unknown_keys = set(keys) - REQUIRED_KEYS
         if unknown_keys:
-            await db.weekly_reports.update_one(
-                {"_id": r_oid, "status": "submitting"},
-                {"$set": {"status": "draft"}}
-            )
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Unknown question keys: {list(unknown_keys)}. Required keys are: {list(REQUIRED_KEYS)}."
-            )
+            await _safe_rollback(f"Unknown question keys: {list(unknown_keys)}. Required keys are: {list(REQUIRED_KEYS)}.")
 
         # Check missing keys
         missing_keys = REQUIRED_KEYS - set(keys)
         if missing_keys:
-            await db.weekly_reports.update_one(
-                {"_id": r_oid, "status": "submitting"},
-                {"$set": {"status": "draft"}}
-            )
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Missing required question keys: {list(missing_keys)}."
-            )
+            await _safe_rollback(f"Missing required question keys: {list(missing_keys)}.")
 
         # Check blank or whitespace-only answers
         for a in answers:
             ans_text = str(a.get("answer", "")).strip()
             if not ans_text:
-                await db.weekly_reports.update_one(
-                    {"_id": r_oid, "status": "submitting"},
-                    {"$set": {"status": "draft"}}
-                )
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"Answer for question '{a.get('question_key')}' cannot be blank."
-                )
+                await _safe_rollback(f"Answer for question '{a.get('question_key')}' cannot be blank.")
 
         # Fetch daily work updates for the report's week and build immutable snapshot
         cursor = db.work_updates.find({
@@ -467,18 +444,29 @@ async def submit_weekly_report(
             "updated_at": now
         }
 
-        await db.weekly_reports.update_one({"_id": r_oid}, {"$set": update_fields})
+        # Finalize report atomically ensuring claim token matches
+        finalize_res = await db.weekly_reports.update_one(
+            {"_id": r_oid, "status": "submitting", "submission_claim_token": claim_token},
+            {"$set": update_fields, "$unset": {"submission_claim_token": ""}}
+        )
+        if getattr(finalize_res, "matched_count", 0) == 0:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Submission ownership lost to a concurrent session. Report was not submitted."
+            )
     except HTTPException:
         raise
     except Exception as exc:
-        logger.error(f"Error during report submission for {report_id}: {exc}. Reverting to draft.")
+        safe_err = _sanitize_error(exc)
+        logger.error(f"Error during report submission for {report_id} (claim {claim_token}): {safe_err}", exc_info=True)
+        # Attempt to roll back status to draft only if this request owns the claim token
         await db.weekly_reports.update_one(
-            {"_id": r_oid, "status": "submitting"},
-            {"$set": {"status": "draft"}}
+            {"_id": r_oid, "status": "submitting", "submission_claim_token": claim_token},
+            {"$set": {"status": "draft", "updated_at": datetime.utcnow()}, "$unset": {"submission_claim_token": ""}}
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Report submission failed: {str(exc)}"
+            detail="An internal error occurred while processing your report submission. Please try again later."
         )
 
     updated_report = await db.weekly_reports.find_one({"_id": r_oid})
