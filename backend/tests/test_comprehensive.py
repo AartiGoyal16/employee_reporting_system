@@ -1284,3 +1284,122 @@ async def test_submission_error_returns_generic_client_safe_message():
             assert "super_secret_db_pass" not in r_sub.text
             assert "InternalDatabaseException" not in r_sub.text
             assert "An internal error occurred" in r_sub.json()["detail"]
+
+@pytest.mark.anyio
+async def test_concurrency_report_submission_blocks_while_work_update_mutation_in_progress():
+    """Ensure report submission rejects (HTTP 409) if a work-update mutation holds the mutation lease."""
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        email = f"mutblock.{int(datetime.utcnow().timestamp())}@company.com"
+        await client.post("/api/v1/auth/register", json={
+            "name": "Mutation Block User",
+            "email": email,
+            "password": "Password@123",
+            "role": "employee"
+        })
+        r_emp = await client.post("/api/v1/auth/login", json={"email": email, "password": "Password@123"})
+        h = {"Authorization": f"Bearer {r_emp.json()['access_token']}"}
+
+        # Create draft report
+        r_d = await client.post("/api/v1/reports/draft", headers=h, json={
+            "week_start_date": "2026-11-09",
+            "week_end_date": "2026-11-15",
+            "answers": []
+        })
+        rep_id = r_d.json()["id"]
+
+        # Simulate an in-flight work-update mutation holding the mutation lock
+        db = get_database()
+        await db.weekly_reports.update_one(
+            {"_id": ObjectId(rep_id)},
+            {"$set": {"active_mutations": 1, "mutation_locked_at": datetime.utcnow()}}
+        )
+
+        valid_answers = [
+            {"question_key": "accomplishments", "question_text": "q1", "answer": "Done"},
+            {"question_key": "in_progress", "question_text": "q2", "answer": "Doing"},
+            {"question_key": "blockers", "question_text": "q3", "answer": "None"},
+            {"question_key": "priorities", "question_text": "q4", "answer": "Next"}
+        ]
+        # Attempt submission -> must be rejected with 409 Conflict
+        r_sub = await client.post(f"/api/v1/reports/{rep_id}/submit", headers=h, json={"answers": valid_answers})
+        assert r_sub.status_code == 409
+        assert "mutation is currently in progress" in r_sub.json()["detail"]
+
+        # Report status is still draft
+        cur_rep = await db.weekly_reports.find_one({"_id": ObjectId(rep_id)})
+        assert cur_rep["status"] == "draft"
+
+@pytest.mark.anyio
+async def test_concurrency_work_update_move_between_two_weeks_atomic():
+    """Ensure moving an update between two weeks atomically coordinates both reports."""
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        email = f"moveweek.{int(datetime.utcnow().timestamp())}@company.com"
+        await client.post("/api/v1/auth/register", json={
+            "name": "Move Week User",
+            "email": email,
+            "password": "Password@123",
+            "role": "employee"
+        })
+        r_emp = await client.post("/api/v1/auth/login", json={"email": email, "password": "Password@123"})
+        h = {"Authorization": f"Bearer {r_emp.json()['access_token']}"}
+
+        # Create update in Week 1 (2026-11-10)
+        r_up = await client.post("/api/v1/updates", headers=h, json={
+            "date": "2026-11-10",
+            "title": "Task in Week 1",
+            "description": "Week 1 details",
+            "category": "Feature",
+            "hours_spent": 4.0
+        })
+        assert r_up.status_code == 201
+        up_id = r_up.json()["id"]
+
+        # Week 2 (2026-11-16 to 2026-11-22) is submitted
+        db = get_database()
+        cur_user = await db.users.find_one({"email": email})
+        user_id = str(cur_user["_id"])
+
+        await db.weekly_reports.insert_one({
+            "_id": ObjectId(),
+            "user_id": user_id,
+            "week_start_date": "2026-11-16",
+            "week_end_date": "2026-11-22",
+            "work_update_ids": [],
+            "answers": [],
+            "status": "submitted",
+            "submitted_at": datetime.utcnow()
+        })
+
+        # Attempt to move update to submitted week 2 (2026-11-17) -> must be rejected
+        r_move_to_submitted = await client.put(f"/api/v1/updates/{up_id}", headers=h, json={
+            "date": "2026-11-17"
+        })
+        assert r_move_to_submitted.status_code == 400
+        assert "submitted" in r_move_to_submitted.json()["detail"]
+
+        # Ensure update date unchanged in database
+        up_check = await db.work_updates.find_one({"_id": ObjectId(up_id)})
+        assert up_check["date"] == "2026-11-10"
+
+        # Now test moving from submitted week 1 to draft week 2
+        # Mark week 1 as submitted and week 2 as draft
+        await db.weekly_reports.update_one(
+            {"user_id": user_id, "week_start_date": "2026-11-09"},
+            {"$set": {"status": "submitted"}}
+        )
+        await db.weekly_reports.update_one(
+            {"user_id": user_id, "week_start_date": "2026-11-16"},
+            {"$set": {"status": "draft"}}
+        )
+
+        r_move_from_submitted = await client.put(f"/api/v1/updates/{up_id}", headers=h, json={
+            "date": "2026-11-17"
+        })
+        assert r_move_from_submitted.status_code == 400
+        assert "submitted" in r_move_from_submitted.json()["detail"]
+
+        # Verify target week report did not keep the update id
+        rep_w2 = await db.weekly_reports.find_one({"user_id": user_id, "week_start_date": "2026-11-16"})
+        assert up_id not in rep_w2.get("work_update_ids", [])

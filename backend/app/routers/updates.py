@@ -31,8 +31,8 @@ async def acquire_draft_report_lease(
     """
     now = datetime.utcnow()
     update_ops = {
-        "$inc": {"mutation_sequence": 1},
-        "$set": {"updated_at": now}
+        "$inc": {"mutation_sequence": 1, "active_mutations": 1},
+        "$set": {"updated_at": now, "mutation_locked_at": now}
     }
     if add_update_id:
         update_ops["$addToSet"] = {"work_update_ids": add_update_id}
@@ -90,6 +90,8 @@ async def acquire_draft_report_lease(
             "submitted_at": None,
             "ai_summary": None,
             "mutation_sequence": 1,
+            "active_mutations": 1,
+            "mutation_locked_at": now,
             "created_at": now,
             "updated_at": now
         })
@@ -114,6 +116,36 @@ async def acquire_draft_report_lease(
             return_document=True
         )
         return (True, "draft") if lease else (False, "locked")
+
+async def release_draft_report_lease(
+    db,
+    user_id: str,
+    week_start: str,
+    week_end: str,
+    rollback_add_id: Optional[str] = None,
+    rollback_remove_id: Optional[str] = None
+):
+    """
+    Releases mutation lock on the weekly report document and cleans up if mutation failed.
+    """
+    ops = {
+        "$inc": {"active_mutations": -1},
+        "$set": {"updated_at": datetime.utcnow()}
+    }
+    if rollback_add_id:
+        ops["$pull"] = {"work_update_ids": rollback_add_id}
+    if rollback_remove_id:
+        ops["$addToSet"] = {"work_update_ids": rollback_remove_id}
+
+    await db.weekly_reports.update_one(
+        {
+            "user_id": user_id,
+            "week_start_date": week_start,
+            "week_end_date": week_end,
+            "status": "draft"
+        },
+        ops
+    )
 
 @router.get("", response_model=List[WorkUpdateResponse])
 async def get_my_work_updates(
@@ -185,7 +217,15 @@ async def create_work_update(
         "created_at": now,
         "updated_at": now
     }
-    await db.work_updates.insert_one(doc)
+    try:
+        await db.work_updates.insert_one(doc)
+    except Exception as exc:
+        await release_draft_report_lease(
+            db, current_user["id"], week_start, week_end, rollback_add_id=str(new_oid)
+        )
+        raise exc
+    finally:
+        await release_draft_report_lease(db, current_user["id"], week_start, week_end)
 
     return WorkUpdateResponse(
         id=str(doc["_id"]),
@@ -292,7 +332,15 @@ async def edit_work_update(
     set_fields = {k: v for k, v in update_data.dict().items() if v is not None}
     set_fields["updated_at"] = datetime.utcnow()
 
-    await db.work_updates.update_one({"_id": oid}, {"$set": set_fields})
+    try:
+        await db.work_updates.update_one({"_id": oid}, {"$set": set_fields})
+    finally:
+        if update_data.date and update_data.date != doc["date"]:
+            await release_draft_report_lease(db, current_user["id"], new_start, new_end)
+            await release_draft_report_lease(db, current_user["id"], old_start, old_end)
+        else:
+            await release_draft_report_lease(db, current_user["id"], week_start, week_end)
+
     updated_doc = await db.work_updates.find_one({"_id": oid})
 
     return WorkUpdateResponse(
@@ -336,5 +384,14 @@ async def delete_work_update(
             detail=f"Cannot delete work update: the weekly report for {week_start} to {week_end} is {report_status} and cannot be modified."
         )
 
-    await db.work_updates.delete_one({"_id": oid})
+    try:
+        await db.work_updates.delete_one({"_id": oid})
+    except Exception as exc:
+        await release_draft_report_lease(
+            db, current_user["id"], week_start, week_end, rollback_remove_id=str(oid)
+        )
+        raise exc
+    finally:
+        await release_draft_report_lease(db, current_user["id"], week_start, week_end)
+
     return None

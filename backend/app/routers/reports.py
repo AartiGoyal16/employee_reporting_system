@@ -351,7 +351,7 @@ async def submit_weekly_report(
     async def _safe_rollback(detail_msg: str, status_code: int = status.HTTP_400_BAD_REQUEST):
         await db.weekly_reports.update_one(
             {"_id": r_oid, "status": "submitting", "submission_claim_token": claim_token},
-            {"$set": {"status": "draft", "updated_at": datetime.utcnow()}, "$unset": {"submission_claim_token": ""}}
+            {"$set": {"status": "draft", "active_mutations": 0, "updated_at": datetime.utcnow()}, "$unset": {"submission_claim_token": ""}}
         )
         raise HTTPException(status_code=status_code, detail=detail_msg)
 
@@ -364,6 +364,25 @@ async def submit_weekly_report(
                 await _safe_rollback("Report week must span a legitimate Monday-to-Sunday period (7 days).")
         except (ValueError, TypeError):
             await _safe_rollback("Invalid report week start or end date format.")
+
+        # Check if an active mutation lock is held on this report (e.g. work update mutation in flight)
+        cur_rep = await db.weekly_reports.find_one({"_id": r_oid})
+        active_mutations = cur_rep.get("active_mutations", 0) if cur_rep else 0
+        if active_mutations > 0:
+            # Check if stale (> 30s)
+            mutation_locked_at = cur_rep.get("mutation_locked_at")
+            age = (datetime.utcnow() - mutation_locked_at).total_seconds() if mutation_locked_at else 999
+            if age <= 30:
+                await _safe_rollback(
+                    "A work-update mutation is currently in progress for this report. Please wait a moment.",
+                    status_code=status.HTTP_409_CONFLICT
+                )
+            else:
+                # Clear stale mutation lock
+                await db.weekly_reports.update_one(
+                    {"_id": r_oid, "status": "submitting", "submission_claim_token": claim_token},
+                    {"$set": {"active_mutations": 0}}
+                )
 
         # 2. Extract and validate answers
         answers = [a.dict() for a in submit_payload.answers] if (submit_payload and submit_payload.answers is not None) else report.get("answers", [])
@@ -462,7 +481,7 @@ async def submit_weekly_report(
         # Attempt to roll back status to draft only if this request owns the claim token
         await db.weekly_reports.update_one(
             {"_id": r_oid, "status": "submitting", "submission_claim_token": claim_token},
-            {"$set": {"status": "draft", "updated_at": datetime.utcnow()}, "$unset": {"submission_claim_token": ""}}
+            {"$set": {"status": "draft", "active_mutations": 0, "updated_at": datetime.utcnow()}, "$unset": {"submission_claim_token": ""}}
         )
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
