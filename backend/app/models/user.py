@@ -1,5 +1,5 @@
-from pydantic import BaseModel, EmailStr, Field
-from typing import Optional
+from pydantic import BaseModel, EmailStr, Field, field_validator
+from typing import Optional, Literal
 from datetime import datetime
 
 class UserBase(BaseModel):
@@ -11,6 +11,29 @@ class UserBase(BaseModel):
 
 class UserCreate(UserBase):
     password: str
+
+class RegisterRequest(BaseModel):
+    name: str = Field(..., min_length=2, max_length=100, description="Full name")
+    email: EmailStr
+    password: str = Field(..., min_length=6, description="Password (min 6 characters)")
+    role: Literal['employee', 'manager'] = Field(..., description="Account role: 'employee' or 'manager'")
+    department: Optional[str] = Field("Engineering", description="Department / team name")
+    manager_id: Optional[str] = Field(None, description="Manager's user ID (required for employees if selecting a manager)")
+
+    @field_validator('password')
+    @classmethod
+    def validate_password_strength(cls, v):
+        if len(v) < 6:
+            raise ValueError('Password must be at least 6 characters long')
+        return v
+
+    @field_validator('name')
+    @classmethod
+    def validate_name(cls, v):
+        v = v.strip()
+        if not v:
+            raise ValueError('Name cannot be empty')
+        return v
 
 class UserLogin(BaseModel):
     email: EmailStr

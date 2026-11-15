@@ -1,20 +1,98 @@
+# =============================================================
+# ENVIRONMENT & SECRETS — never commit these
+# =============================================================
+.env
+.env.*
+!.env.example          # keep the example template
+*.env
+*.secret
+secrets/
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+
+# =============================================================
 # Python
+# =============================================================
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
+*.egg
+*.egg-info/
+dist/
+build/
+eggs/
 .Python
-backend/venv/
+.pyo
+.pyc
+.cache/
+.pytest_cache/
 backend/.pytest_cache/
-.env
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+.coverage.*
+coverage.xml
+*.log
 
-# Node.js
+# Virtual environments
+backend/venv/
+venv/
+env/
+ENV/
+.venv/
+
+# =============================================================
+# Node.js / Frontend
+# =============================================================
 node_modules/
 frontend/node_modules/
 frontend/dist/
+frontend/build/
+frontend/.cache/
 dist/
-.DS_Store
+build/
 
-# IDE
+# Package-lock is committed; skip yarn.lock if only npm is used
+# yarn.lock
+
+# =============================================================
+# Build / OS artefacts
+# =============================================================
+.DS_Store
+Thumbs.db
+Desktop.ini
+*.swp
+*.swo
+*~
+
+# =============================================================
+# IDE & Editors
+# =============================================================
 .vscode/
 .idea/
+*.iml
+*.ipr
+*.iws
+.project
+.classpath
+.c9/
+*.launch
+.settings/
+
+# =============================================================
+# Docker & deployment
+# =============================================================
+*.override.yml
+docker-compose.override.yml
+
+# =============================================================
+# Misc
+# =============================================================
+*.bak
+*.tmp
+*.temp

@@ -39,6 +39,16 @@ export const AuthProvider = ({ children }) => {
     return userData;
   };
 
+  const register = async (formData) => {
+    const response = await authService.register(formData);
+    const { access_token, user: userData } = response.data;
+    localStorage.setItem('token', access_token);
+    localStorage.setItem('user', JSON.stringify(userData));
+    setToken(access_token);
+    setUser(userData);
+    return userData;
+  };
+
   const logout = () => {
     localStorage.removeItem('token');
     localStorage.removeItem('user');
@@ -55,6 +65,7 @@ export const AuthProvider = ({ children }) => {
     isManager: user?.role === 'manager',
     loading,
     login,
+    register,
     logout,
   };
 

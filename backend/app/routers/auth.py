@@ -2,12 +2,102 @@ from fastapi import APIRouter, HTTPException, status, Depends
 from datetime import datetime
 from bson import ObjectId
 from app.database import get_database
-from app.models.user import UserLogin, TokenResponse, UserResponse
-from app.auth.security import verify_password
+from app.models.user import UserLogin, TokenResponse, UserResponse, RegisterRequest
+from app.auth.security import verify_password, get_password_hash
 from app.auth.jwt import create_access_token
 from app.auth.dependencies import get_current_user
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
+
+@router.post("/register", response_model=TokenResponse, status_code=status.HTTP_201_CREATED)
+async def register(payload: RegisterRequest):
+    """
+    Register a new employee or manager account.
+    - Validates unique email (409 Conflict if already registered).
+    - Hashes password with bcrypt.
+    - Employees may optionally associate with a manager via manager_id.
+    - Returns JWT token + user profile immediately so the client can log in directly.
+    """
+    db = get_database()
+    email_clean = payload.email.strip().lower()
+
+    # 1. Duplicate email check
+    existing = await db.users.find_one({"email": email_clean})
+    if existing:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="An account with this email address already exists. Please log in instead."
+        )
+
+    # 2. Validate manager_id if provided
+    resolved_manager_id = None
+    resolved_manager_name = None
+    if payload.manager_id:
+        try:
+            m_oid = ObjectId(payload.manager_id)
+        except Exception:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid manager ID format."
+            )
+        manager = await db.users.find_one({"_id": m_oid, "role": "manager"})
+        if not manager:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Selected manager not found. Please choose a valid manager."
+            )
+        resolved_manager_id = str(manager["_id"])
+        resolved_manager_name = manager["name"]
+
+    # 3. Create user document
+    new_id = ObjectId()
+    now = datetime.utcnow()
+    user_doc = {
+        "_id": new_id,
+        "email": email_clean,
+        "name": payload.name.strip(),
+        "hashed_password": get_password_hash(payload.password),
+        "role": payload.role,
+        "department": payload.department or "Engineering",
+        "manager_id": resolved_manager_id,
+        "created_at": now,
+    }
+    await db.users.insert_one(user_doc)
+
+    # 4. Issue JWT and return TokenResponse (auto-login after signup)
+    user_id_str = str(new_id)
+    token = create_access_token(data={
+        "sub": user_id_str,
+        "email": email_clean,
+        "role": payload.role,
+        "name": payload.name.strip()
+    })
+
+    user_resp = UserResponse(
+        id=user_id_str,
+        email=email_clean,
+        name=payload.name.strip(),
+        role=payload.role,
+        department=payload.department or "Engineering",
+        manager_id=resolved_manager_id,
+        created_at=now
+    )
+    return TokenResponse(access_token=token, token_type="bearer", user=user_resp)
+
+@router.get("/managers", response_model=list)
+async def get_managers_list():
+    """
+    Public endpoint: Returns all manager accounts so the signup form can
+    populate the 'Report To' dropdown for new employee accounts.
+    """
+    db = get_database()
+    cursor = db.users.find({"role": "manager"}).sort("name", 1)
+    managers = await cursor.to_list(length=100)
+    return [
+        {"id": str(m["_id"]), "name": m["name"], "department": m.get("department", "")}
+        for m in managers
+    ]
+
 
 @router.post("/login", response_model=TokenResponse)
 async def login(credentials: UserLogin):

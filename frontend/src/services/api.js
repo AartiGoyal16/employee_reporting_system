@@ -40,6 +40,8 @@ api.interceptors.response.use(
 // Auth Services
 export const authService = {
   login: (email, password) => api.post('/auth/login', { email, password }),
+  register: (data) => api.post('/auth/register', data),
+  getManagers: () => api.get('/auth/managers'),
   getMe: () => api.get('/auth/me'),
   getDemoUsers: () => api.get('/auth/demo-users'),
 };
