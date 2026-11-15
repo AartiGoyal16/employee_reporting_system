@@ -217,6 +217,8 @@ MongoDB is used as the document store. Documents are structured to support fast,
    - `ACCESS_TOKEN_EXPIRE_MINUTES`: `10080`
    - `GEMINI_API_KEY`: *Your Google AI Studio API key*
    - `GEMINI_MODEL`: `gemini-3.5-flash-lite`
+   - `GROQ_API_KEY`: *(Optional) Your Groq API key for secondary fallback*
+   - `GROQ_MODEL`: `openai/gpt-oss-120b`
    - `BACKEND_CORS_ORIGINS`: `["https://your-frontend-app.vercel.app"]` *(IMPORTANT: Must be your exact Vercel frontend URL. Wildcards are strictly blocked in production)*
    - `ENABLE_DEMO_USERS`: `false` *(Disables public demo credentials endpoint)*
    - `ENABLE_REMINDER_SCHEDULER`: `true`

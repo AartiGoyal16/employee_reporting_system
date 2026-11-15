@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 def redact_mongo_uri(uri_or_text: str) -> str:
     """
     Redacts password and credentials from MongoDB URI strings or exception messages.
-    e.g. mongodb+srv://user:secret123@cluster.mongodb.net -> mongodb+srv://user:***@cluster.mongodb.net
+    Replaces any 'user:pass@' substring with 'user:***@'.
     """
     if not uri_or_text:
         return ""

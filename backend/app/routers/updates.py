@@ -82,6 +82,21 @@ async def create_work_update(
     }
     await db.work_updates.insert_one(doc)
 
+    # Double-check race condition: ensure report was not locked to submitting/submitted during insert
+    race_check = await db.weekly_reports.find_one({
+        "user_id": current_user["id"],
+        "status": {"$in": ["submitting", "submitted"]},
+        "week_start_date": {"$lte": update_data.date},
+        "week_end_date": {"$gte": update_data.date}
+    })
+    if race_check:
+        await db.work_updates.delete_one({"_id": doc["_id"]})
+        report_status = race_check.get("status", "submitted")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Cannot add work update for {update_data.date}: weekly report is {report_status} and cannot be modified."
+        )
+
     return WorkUpdateResponse(
         id=str(doc["_id"]),
         user_id=doc["user_id"],
@@ -178,6 +193,23 @@ async def edit_work_update(
     set_fields["updated_at"] = datetime.utcnow()
 
     await db.work_updates.update_one({"_id": oid}, {"$set": set_fields})
+
+    # Double-check race condition: ensure report was not locked to submitting/submitted during edit
+    race_check = await db.weekly_reports.find_one({
+        "user_id": current_user["id"],
+        "status": {"$in": ["submitting", "submitted"]},
+        "week_start_date": {"$lte": set_fields.get("date", doc["date"])},
+        "week_end_date": {"$gte": set_fields.get("date", doc["date"])}
+    })
+    if race_check:
+        # Roll back edit
+        revert_fields = {k: doc.get(k) for k in set_fields.keys()}
+        await db.work_updates.update_one({"_id": oid}, {"$set": revert_fields})
+        report_status = race_check.get("status", "submitted")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Cannot edit work update: the weekly report is {report_status} and cannot be modified."
+        )
     updated_doc = await db.work_updates.find_one({"_id": oid})
 
     return WorkUpdateResponse(

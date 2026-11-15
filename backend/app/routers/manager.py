@@ -111,3 +111,93 @@ async def trigger_team_reminders(current_user: dict = Depends(require_manager)):
     from app.services.reminder import run_reminder_check
     result = await run_reminder_check(manager_id=current_user["id"], force=True)
     return result
+
+@router.get("/unassigned-employees", response_model=List[UserResponse])
+async def get_unassigned_employees(current_user: dict = Depends(require_manager)):
+    """Retrieve employees who do not currently have an assigned manager."""
+    db = get_database()
+    cursor = db.users.find({
+        "role": "employee",
+        "$or": [{"manager_id": None}, {"manager_id": ""}]
+    }).sort("name", 1)
+    employees = await cursor.to_list(length=100)
+    return [
+        UserResponse(
+            id=str(e["_id"]),
+            email=e["email"],
+            name=e["name"],
+            role=e["role"],
+            department=e.get("department"),
+            manager_id=e.get("manager_id"),
+            created_at=e.get("created_at")
+        )
+        for e in employees
+    ]
+
+@router.post("/employees/{employee_id}/unassign")
+async def unassign_employee(
+    employee_id: str,
+    current_user: dict = Depends(require_manager)
+):
+    """
+    Manager unassigns an employee from their team roster (e.g. if mistakenly selected during signup).
+    """
+    db = get_database()
+    try:
+        emp_oid = ObjectId(employee_id)
+    except Exception:
+        emp_oid = employee_id
+
+    emp = await db.users.find_one({"_id": emp_oid, "role": "employee", "manager_id": current_user["id"]})
+    if not emp:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Employee not found or is not assigned to you."
+        )
+
+    await db.users.update_one(
+        {"_id": emp_oid},
+        {"$set": {"manager_id": None}}
+    )
+
+    # Also update any draft reports to clear manager
+    await db.weekly_reports.update_many(
+        {"user_id": str(emp_oid), "status": "draft"},
+        {"$set": {"manager_id": None, "manager_name": None}}
+    )
+
+    return {"status": "success", "message": f"Employee {emp['name']} unassigned successfully."}
+
+@router.post("/employees/{employee_id}/assign")
+async def assign_employee(
+    employee_id: str,
+    current_user: dict = Depends(require_manager)
+):
+    """
+    Manager claims / assigns an employee to their team.
+    """
+    db = get_database()
+    try:
+        emp_oid = ObjectId(employee_id)
+    except Exception:
+        emp_oid = employee_id
+
+    emp = await db.users.find_one({"_id": emp_oid, "role": "employee"})
+    if not emp:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Employee not found."
+        )
+
+    await db.users.update_one(
+        {"_id": emp_oid},
+        {"$set": {"manager_id": current_user["id"]}}
+    )
+
+    # Update draft reports with assigned manager
+    await db.weekly_reports.update_many(
+        {"user_id": str(emp_oid), "status": "draft"},
+        {"$set": {"manager_id": current_user["id"], "manager_name": current_user["name"]}}
+    )
+
+    return {"status": "success", "message": f"Employee {emp['name']} assigned to {current_user['name']}."}

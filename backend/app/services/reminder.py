@@ -81,49 +81,49 @@ async def run_reminder_check(manager_id: Optional[str] = None, force: bool = Fal
             "type": "deadline_reminder"
         }
 
-        # Check existing claim status regardless of force=True or force=False
-        existing = await db.reminder_logs.find_one(claim_key)
-        if existing:
-            claim_status = existing.get("status")
-            if claim_status == "sent":
-                # Already successfully sent to this employee for this week
-                continue
-            elif claim_status == "claimed":
-                # Check for abandoned/stale claim (> 300 seconds)
-                claimed_at = existing.get("claimed_at")
-                if isinstance(claimed_at, str):
-                    try:
-                        claimed_at = datetime.fromisoformat(claimed_at)
-                    except Exception:
-                        claimed_at = datetime.utcnow()
-                age = (datetime.utcnow() - (claimed_at or datetime.utcnow())).total_seconds()
-                if age < 300:
-                    # In progress by another worker
-                    continue
-                logger.warning(f"[Reminder] Recovering abandoned claim for {emp_email} (age {age:.1f}s)")
-                await db.reminder_logs.update_one(
-                    claim_key,
-                    {"$set": {"status": "claimed", "claimed_at": datetime.utcnow()}}
-                )
-            elif claim_status == "failed":
-                # Previous attempt failed; allow re-attempt by re-claiming
-                logger.info(f"[Reminder] Retrying previously failed reminder for {emp_email}")
-                await db.reminder_logs.update_one(
-                    claim_key,
-                    {"$set": {"status": "claimed", "claimed_at": datetime.utcnow()}}
-                )
+        now = datetime.utcnow()
+        stale_cutoff = now - timedelta(seconds=300)
+        stale_cutoff_iso = stale_cutoff.isoformat()
+
+        # Step 2A: Atomically reclaim any failed or abandoned claim (>300s)
+        reclaimed = await db.reminder_logs.find_one_and_update(
+            {
+                **claim_key,
+                "$or": [
+                    {"status": "failed"},
+                    {"status": "claimed", "claimed_at": {"$lte": stale_cutoff}},
+                    {"status": "claimed", "claimed_at": {"$lte": stale_cutoff_iso}}
+                ]
+            },
+            {"$set": {"status": "claimed", "claimed_at": now}}
+        )
+
+        claim_acquired = False
+        if reclaimed:
+            claim_acquired = True
+            logger.info(f"[Reminder] Atomically claimed previously {reclaimed.get('status')} reminder for {emp_email}")
         else:
-            # Atomically attempt to insert the claim to prevent other instances from double-sending
+            # Check if already successfully sent or currently active
+            existing = await db.reminder_logs.find_one(claim_key)
+            if existing:
+                # Already sent or actively claimed by another worker
+                continue
+
+            # Step 2B: Atomically insert brand new claim
             try:
                 await db.reminder_logs.insert_one({
                     **claim_key,
                     "week_end_date": week_end,
                     "status": "claimed",
-                    "claimed_at": datetime.utcnow()
+                    "claimed_at": now
                 })
+                claim_acquired = True
             except Exception:
-                # Duplicate record exists; another instance claimed it
-                continue
+                # Duplicate record exists; another instance claimed it concurrently
+                claim_acquired = False
+
+        if not claim_acquired:
+            continue
 
         # 3. Dispatch reminder email
         try:

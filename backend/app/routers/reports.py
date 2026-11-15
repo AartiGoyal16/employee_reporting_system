@@ -202,8 +202,8 @@ async def save_report_draft(
     now = datetime.utcnow()
 
     if report:
-        await db.weekly_reports.update_one(
-            {"_id": report["_id"]},
+        res = await db.weekly_reports.update_one(
+            {"_id": report["_id"], "status": "draft"},
             {
                 "$set": {
                     "answers": answers_list,
@@ -211,6 +211,11 @@ async def save_report_draft(
                 }
             }
         )
+        if getattr(res, "matched_count", 0) == 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Report is currently submitting or submitted and cannot be modified."
+            )
         updated = await db.weekly_reports.find_one({"_id": report["_id"]})
     else:
         # Create draft
@@ -318,12 +323,34 @@ async def submit_weekly_report(
     report = claimed
 
     try:
-        # Update answers if supplied in payload
-        answers = [a.dict() for a in submit_payload.answers] if (submit_payload and submit_payload.answers is not None) else report.get("answers", [])
+        # 1. Validate legitimate Monday-to-Sunday week
+        try:
+            start_dt = datetime.strptime(report.get("week_start_date", ""), "%Y-%m-%d")
+            end_dt = datetime.strptime(report.get("week_end_date", ""), "%Y-%m-%d")
+            if start_dt.weekday() != 0 or end_dt.weekday() != 6 or (end_dt - start_dt).days != 6:
+                await db.weekly_reports.update_one(
+                    {"_id": r_oid, "status": "submitting"},
+                    {"$set": {"status": "draft"}}
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Report week must span a legitimate Monday-to-Sunday period (7 days)."
+                )
+        except (ValueError, TypeError):
+            await db.weekly_reports.update_one(
+                {"_id": r_oid, "status": "submitting"},
+                {"$set": {"status": "draft"}}
+            )
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid report week start or end date format."
+            )
 
-        # Validate that all 4 required questions have non-empty answers
-        if not answers or len(answers) < 4 or any(not str(a.get("answer", "")).strip() for a in answers):
-            # Roll back status to draft
+        # 2. Extract and validate answers
+        answers = [a.dict() for a in submit_payload.answers] if (submit_payload and submit_payload.answers is not None) else report.get("answers", [])
+        REQUIRED_KEYS = {"accomplishments", "in_progress", "blockers", "priorities"}
+
+        if not answers:
             await db.weekly_reports.update_one(
                 {"_id": r_oid, "status": "submitting"},
                 {"$set": {"status": "draft"}}
@@ -332,6 +359,67 @@ async def submit_weekly_report(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="All 4 weekly reflection questions must be answered before submitting."
             )
+
+        keys = [a.get("question_key") for a in answers]
+
+        # Check duplicates
+        if len(keys) != len(set(keys)):
+            await db.weekly_reports.update_one(
+                {"_id": r_oid, "status": "submitting"},
+                {"$set": {"status": "draft"}}
+            )
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Duplicate question keys found in report answers."
+            )
+
+        # Check count of distinct answers
+        if len(keys) != 4:
+            await db.weekly_reports.update_one(
+                {"_id": r_oid, "status": "submitting"},
+                {"$set": {"status": "draft"}}
+            )
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Report submission requires exactly 4 distinct weekly questions (received {len(keys)})."
+            )
+
+        # Check unknown keys
+        unknown_keys = set(keys) - REQUIRED_KEYS
+        if unknown_keys:
+            await db.weekly_reports.update_one(
+                {"_id": r_oid, "status": "submitting"},
+                {"$set": {"status": "draft"}}
+            )
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Unknown question keys: {list(unknown_keys)}. Required keys are: {list(REQUIRED_KEYS)}."
+            )
+
+        # Check missing keys
+        missing_keys = REQUIRED_KEYS - set(keys)
+        if missing_keys:
+            await db.weekly_reports.update_one(
+                {"_id": r_oid, "status": "submitting"},
+                {"$set": {"status": "draft"}}
+            )
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Missing required question keys: {list(missing_keys)}."
+            )
+
+        # Check blank or whitespace-only answers
+        for a in answers:
+            ans_text = str(a.get("answer", "")).strip()
+            if not ans_text:
+                await db.weekly_reports.update_one(
+                    {"_id": r_oid, "status": "submitting"},
+                    {"$set": {"status": "draft"}}
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Answer for question '{a.get('question_key')}' cannot be blank."
+                )
 
         # Fetch daily work updates for the report's week and build immutable snapshot
         cursor = db.work_updates.find({

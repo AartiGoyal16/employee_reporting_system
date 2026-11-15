@@ -193,7 +193,7 @@ Open your browser at `http://localhost:5173`.
 
 - **Primary Model**: **Google Gemini 3.5 Flash-Lite** (`gemini-3.5-flash-lite`, configurable via `GEMINI_MODEL`).
   - *Why selected*: Google Gemini 3.5 Flash-Lite is officially supported on the free tier according to Google's official Gemini API documentation, providing high speed, structured JSON generation, and a generous context window. Predecessor models (`gemini-1.5-flash` and `gemini-2.5-flash`) have been deprecated or phased out for new projects.
-  - *Fallback*: Secondary fallback to Groq Llama-3.1 (`llama-3.1-8b-instant`) free tier.
+  - *Fallback*: Secondary fallback to Groq (`openai/gpt-oss-120b`) free tier.
 - **Fail-Safe Heuristic Engine**: If no API key is supplied or external provider rate limits/timeouts occur, the built-in deterministic NLP heuristic engine parses work categories, logged hours, completed milestones, and blockers to synthesize the executive summary and manager recommendation. Output is strictly marked with `model_used: "Deterministic Heuristic Fallback (Local)"`. Never hallucinates or invents deliverables if updates are absent.
 - **Retry Mechanism**: The system automatically executes exponential retries on transient connection timeouts.
 - **Security & Guardrails**: The API key is sent via standard HTTP header `x-goog-api-key` (never exposed in query parameters or logged); the prompt explicitly instructs the LLM not to invent tasks or embellish outside the provided updates. Error logs automatically redact sensitive credentials.

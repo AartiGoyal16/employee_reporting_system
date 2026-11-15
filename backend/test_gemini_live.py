@@ -20,7 +20,7 @@ async def test_live_gemini():
     api_key = os.getenv("GEMINI_API_KEY") or settings.GEMINI_API_KEY
     if not api_key:
         print("\n[ERROR] GEMINI_API_KEY is not set in environment or backend/.env file.")
-        print("Please add your API key to backend/.env: GEMINI_API_KEY=\"AIzaSy...\" and re-run.\n")
+        print("Please add your API key to backend/.env: GEMINI_API_KEY=\"<your-api-key>\" and re-run.\n")
         return
 
     # Strictly mask the key for display

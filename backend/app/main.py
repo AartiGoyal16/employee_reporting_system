@@ -16,6 +16,41 @@ logging.basicConfig(
 )
 logger = logging.getLogger("api")
 
+async def recover_stale_submitting_reports(db, stale_seconds: int = 120) -> int:
+    """
+    Atomically recovers genuinely stale abandoned 'submitting' reports back to 'draft'.
+    Prevents active submissions on concurrent running instances from being erroneously reset.
+    """
+    from datetime import datetime, timedelta
+    now = datetime.utcnow()
+    cutoff_dt = now - timedelta(seconds=stale_seconds)
+    cutoff_iso = cutoff_dt.isoformat()
+
+    filter_query = {
+        "status": "submitting",
+        "$or": [
+            {"submission_started_at": {"$lte": cutoff_dt}},
+            {"submission_started_at": {"$lte": cutoff_iso}},
+            {
+                "submission_started_at": None,
+                "$or": [
+                    {"updated_at": {"$lte": cutoff_dt}},
+                    {"updated_at": {"$lte": cutoff_iso}},
+                    {"updated_at": None}
+                ]
+            }
+        ]
+    }
+
+    res = await db.weekly_reports.update_many(
+        filter_query,
+        {"$set": {"status": "draft", "updated_at": now}}
+    )
+    count = getattr(res, "modified_count", 0)
+    if count:
+        logger.info(f"Recovered {count} genuinely stale 'submitting' reports back to 'draft'.")
+    return count
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
@@ -27,15 +62,9 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"Error during auto-seeding: {e}")
 
-    # Recover any stale reports stuck in 'submitting' from previous server crash
+    # Recover only genuinely stale reports stuck in 'submitting' (> 120 seconds)
     try:
-        from datetime import datetime
-        res = await db.weekly_reports.update_many(
-            {"status": "submitting"},
-            {"$set": {"status": "draft", "updated_at": datetime.utcnow()}}
-        )
-        if getattr(res, "modified_count", 0):
-            logger.info(f"Recovered {res.modified_count} stale 'submitting' reports back to 'draft'.")
+        await recover_stale_submitting_reports(db, stale_seconds=120)
     except Exception as e:
         logger.warning(f"Could not perform startup stale report recovery: {e}")
     # Launch background deadline reminder scheduler if enabled

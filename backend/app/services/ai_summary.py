@@ -87,13 +87,19 @@ Respond with strict, valid JSON ONLY (no markdown formatting, no backticks, no c
         parsed["generated_at"] = datetime.utcnow()
         return parsed
 
-async def generate_groq_summary(report_data: Dict[str, Any], api_key: str) -> Dict[str, Any]:
+async def generate_groq_summary(
+    report_data: Dict[str, Any],
+    api_key: str,
+    model_override: Optional[str] = None
+) -> Dict[str, Any]:
     """Generates structured AI summary using Groq fallback provider."""
     url = "https://api.groq.com/openai/v1/chat/completions"
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json"
     }
+
+    model = model_override or os.getenv("GROQ_MODEL") or getattr(settings, "GROQ_MODEL", "openai/gpt-oss-120b")
 
     prompt = f"""You are an engineering management advisor. Analyze this weekly employee report and output strict JSON.
 Ground your response exclusively on the provided data without hallucinating new facts.
@@ -103,7 +109,7 @@ Report:
 Return JSON with exact keys: executive_summary (string), key_highlights (list of strings), blockers_identified (list of strings), manager_recommendation (string)."""
 
     payload = {
-        "model": "llama-3.3-70b-versatile",
+        "model": model,
         "messages": [
             {"role": "system", "content": "You are a professional management analyst. Always return valid JSON."},
             {"role": "user", "content": prompt}
@@ -118,7 +124,7 @@ Return JSON with exact keys: executive_summary (string), key_highlights (list of
         data = response.json()
         content = data["choices"][0]["message"]["content"]
         parsed = json.loads(content)
-        parsed["model_used"] = "Groq Llama-3 (Free Tier Fallback)"
+        parsed["model_used"] = f"Groq Cloud ({model})"
         parsed["generated_at"] = datetime.utcnow()
         return parsed
 
@@ -194,14 +200,18 @@ def generate_heuristic_summary(report_data: Dict[str, Any]) -> Dict[str, Any]:
         "generated_at": datetime.utcnow()
     }
 
-async def generate_ai_summary_with_retry(report_data: Dict[str, Any], max_retries: int = 2) -> Dict[str, Any]:
+async def generate_ai_summary_with_retry(
+    report_data: Dict[str, Any],
+    max_retries: int = 2,
+    force_provider_chain: bool = False
+) -> Dict[str, Any]:
     """
     Attempts generation with free AI provider (Gemini or Groq), retrying on transient failures,
     and falls back deterministically to the local heuristic engine so report submission never fails.
-    Suppresses live network calls during automated test runs.
+    Suppresses live network calls during automated test runs unless explicitly testing provider chain.
     """
     is_test = os.getenv("TESTING") == "1" or settings.ENVIRONMENT.lower() == "test"
-    if is_test and not os.getenv("ALLOW_LIVE_AI_IN_TESTS"):
+    if is_test and not os.getenv("ALLOW_LIVE_AI_IN_TESTS") and not force_provider_chain:
         logger.info("[TESTING] Using deterministic local summary engine for test run.")
         return generate_heuristic_summary(report_data)
 

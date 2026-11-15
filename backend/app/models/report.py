@@ -39,8 +39,23 @@ class WeeklyReportCreateOrSave(BaseModel):
 
     @model_validator(mode="after")
     def validate_range(self):
-        if self.week_start_date > self.week_end_date:
+        try:
+            start = datetime.strptime(self.week_start_date, "%Y-%m-%d")
+            end = datetime.strptime(self.week_end_date, "%Y-%m-%d")
+        except ValueError:
+            raise ValueError("Dates must be valid YYYY-MM-DD calendar dates")
+
+        if start > end:
             raise ValueError("week_start_date cannot be after week_end_date")
+
+        # Validate legitimate Monday-to-Sunday week
+        if start.weekday() != 0:
+            raise ValueError(f"week_start_date ({self.week_start_date}) must be a Monday")
+        if end.weekday() != 6:
+            raise ValueError(f"week_end_date ({self.week_end_date}) must be a Sunday")
+        if (end - start).days != 6:
+            raise ValueError("Weekly report period must span exactly 7 days from Monday to Sunday")
+
         return self
 
 class WeeklyReportSubmit(BaseModel):

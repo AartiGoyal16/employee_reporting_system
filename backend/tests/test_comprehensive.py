@@ -463,7 +463,7 @@ async def test_gemini_summary_api_error_handling_and_fallback():
 @pytest.mark.anyio
 async def test_gemini_api_key_sanitization():
     """Ensures that secret API keys are never leaked in error messages or logs."""
-    fake_secret = "AIzaSySecretFakeKey1234567890"
+    fake_secret = "test_mock_gemini_key_xyz987654321"
     err = ValueError(f"Connection failed while calling endpoint with key {fake_secret}")
     sanitized = _sanitize_error(err, fake_secret)
     assert fake_secret not in sanitized
@@ -537,16 +537,18 @@ async def test_health_check_endpoint():
 # 7. FINAL DEFECT FIXES VERIFICATION TESTS
 # ============================================================================
 
-def test_mongo_uri_redaction():
+@pytest.mark.anyio
+async def test_mongo_uri_redaction():
     """Priority 1: Redacts MongoDB credentials from URIs and exception strings."""
-    raw_uri = "mongodb+srv://admin_user:P@ssw0rd123!@cluster0.abcde.mongodb.net/testdb?retryWrites=true"
+    secret_pass = "mock_db_secret_pass"
+    raw_uri = f"mongodb+srv://admin_user:{secret_pass}@mock-cluster.mongodb.net/testdb?retryWrites=true"
     redacted = redact_mongo_uri(raw_uri)
-    assert "P@ssw0rd123!" not in redacted
+    assert secret_pass not in redacted
     assert "admin_user:***@" in redacted
 
     err_msg = f"Connection failed to {raw_uri} timed out"
     redacted_err = redact_mongo_uri(err_msg)
-    assert "P@ssw0rd123!" not in redacted_err
+    assert secret_pass not in redacted_err
     assert "admin_user:***@" in redacted_err
 
 @pytest.mark.anyio
@@ -709,14 +711,14 @@ async def test_submit_requires_all_four_answers():
         # Attempt submission with blank answers -> 400
         r_sub = await client.post(f"/api/v1/reports/{rep_id}/submit", headers=h, json={
             "answers": [
-                {"question_key": "q1", "question_text": "Q1", "answer": "Answer 1"},
-                {"question_key": "q2", "question_text": "Q2", "answer": "   "},
-                {"question_key": "q3", "question_text": "Q3", "answer": "Answer 3"},
-                {"question_key": "q4", "question_text": "Q4", "answer": "Answer 4"}
+                {"question_key": "accomplishments", "question_text": "Q1", "answer": "Answer 1"},
+                {"question_key": "in_progress", "question_text": "Q2", "answer": "   "},
+                {"question_key": "blockers", "question_text": "Q3", "answer": "Answer 3"},
+                {"question_key": "priorities", "question_text": "Q4", "answer": "Answer 4"}
             ]
         })
         assert r_sub.status_code == 400
-        assert "all 4 weekly reflection questions must be answered" in r_sub.json()["detail"].lower()
+        assert "blank" in r_sub.json()["detail"].lower()
 
 @pytest.mark.anyio
 async def test_stale_submitting_report_recovery():
@@ -809,7 +811,7 @@ async def test_mocked_gemini_groq_local_fallback_sequence():
             "key_highlights": ["Groq Highlight"],
             "blockers_identified": [],
             "manager_recommendation": "Groq Rec",
-            "model_used": "Groq Llama-3 (Free Tier Fallback)"
+            "model_used": "Groq Cloud (openai/gpt-oss-120b)"
         }):
             with patch.object(settings, "GEMINI_API_KEY", "fake_gemini_key"):
                 with patch.object(settings, "GROQ_API_KEY", "fake_groq_key"):
@@ -851,3 +853,292 @@ async def test_seed_data_gemini_metadata():
     model = alex_report["ai_summary"].get("model_used", "")
     assert "1.5" not in model, f"Found obsolete model in seeded report: {model}"
     assert "gemini-3.5-flash-lite" in model
+
+# ============================================================================
+# 8. LATEST COMMIT AUDIT REGRESSION SUITE
+# ============================================================================
+
+from app.main import recover_stale_submitting_reports
+
+@pytest.mark.anyio
+async def test_startup_recovery_active_vs_stale_reports():
+    """Requirement 2: Active reports (<120s) must NOT be reset; only genuinely stale reports (>120s) are reset."""
+    db = get_database()
+    now = datetime.utcnow()
+    
+    # 1. Active report (submitted 10s ago)
+    active_id = ObjectId()
+    await db.weekly_reports.insert_one({
+        "_id": active_id,
+        "user_id": "test_user_active",
+        "week_start_date": "2026-11-09",
+        "week_end_date": "2026-11-15",
+        "status": "submitting",
+        "submission_started_at": now - timedelta(seconds=10),
+        "updated_at": now - timedelta(seconds=10)
+    })
+
+    # 2. Stale report (submitted 300s ago)
+    stale_id = ObjectId()
+    await db.weekly_reports.insert_one({
+        "_id": stale_id,
+        "user_id": "test_user_stale",
+        "week_start_date": "2026-11-09",
+        "week_end_date": "2026-11-15",
+        "status": "submitting",
+        "submission_started_at": now - timedelta(seconds=300),
+        "updated_at": now - timedelta(seconds=300)
+    })
+
+    # Run recovery with 120s threshold
+    recovered_count = await recover_stale_submitting_reports(db, stale_seconds=120)
+    assert recovered_count >= 1
+
+    active_doc = await db.weekly_reports.find_one({"_id": active_id})
+    assert active_doc["status"] == "submitting", "Active report was erroneously reset!"
+
+    stale_doc = await db.weekly_reports.find_one({"_id": stale_id})
+    assert stale_doc["status"] == "draft", "Stale report was not recovered to draft!"
+
+@pytest.mark.anyio
+async def test_groq_fallback_generation_mocked():
+    """Requirement 3: Verifies Groq fallback with openai/gpt-oss-120b and Gemini error."""
+    sample_data = {
+        "user_name": "Groq Tester",
+        "week_start_date": "2026-11-09",
+        "week_end_date": "2026-11-15",
+        "work_updates": [{"title": "Groq Feature", "category": "Feature", "hours_spent": 4.0}],
+        "answers": [{"question_key": "accomplishments", "answer": "Done"}]
+    }
+
+    # Gemini fails, Groq succeeds
+    with patch("app.services.ai_summary.generate_gemini_summary", side_effect=Exception("Gemini Service Unavailable")):
+        with patch("app.services.ai_summary.generate_groq_summary", return_value={
+            "executive_summary": "Groq fallback generated report.",
+            "key_highlights": ["Groq Feature"],
+            "blockers_identified": [],
+            "manager_recommendation": "Maintain momentum.",
+            "model_used": "Groq Cloud (openai/gpt-oss-120b)"
+        }):
+            with patch.object(settings, "GEMINI_API_KEY", "mock_gemini_key"):
+                with patch.object(settings, "GROQ_API_KEY", "mock_groq_key"):
+                    res = await generate_ai_summary_with_retry(sample_data, max_retries=1, force_provider_chain=True)
+                    assert "Groq Cloud" in res["model_used"]
+                    assert "openai/gpt-oss-120b" in res["model_used"]
+
+@pytest.mark.anyio
+async def test_report_validation_monday_to_sunday_week():
+    """Requirement 5: Enforces legitimate Monday-to-Sunday week boundary."""
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        r_emp = await client.post("/api/v1/auth/login", json={"email": "alex@company.com", "password": "Employee@123"})
+        headers = {"Authorization": f"Bearer {r_emp.json()['access_token']}"}
+
+        # Case 1: Start date is Tuesday (not Monday) -> Reject
+        r_tuesday = await client.post("/api/v1/reports/draft", headers=headers, json={
+            "week_start_date": "2026-11-10", # Tuesday
+            "week_end_date": "2026-11-15",   # Sunday
+            "answers": []
+        })
+        assert r_tuesday.status_code in [400, 422]
+
+        # Case 2: End date is Saturday (not Sunday) -> Reject
+        r_saturday = await client.post("/api/v1/reports/draft", headers=headers, json={
+            "week_start_date": "2026-11-09", # Monday
+            "week_end_date": "2026-11-14",   # Saturday
+            "answers": []
+        })
+        assert r_saturday.status_code in [400, 422]
+
+        # Case 3: Legitimate Monday to Sunday -> Accepted
+        r_valid = await client.post("/api/v1/reports/draft", headers=headers, json={
+            "week_start_date": "2026-11-09", # Monday
+            "week_end_date": "2026-11-15",   # Sunday
+            "answers": []
+        })
+        assert r_valid.status_code == 200
+
+@pytest.mark.anyio
+async def test_report_submission_answer_validation():
+    """Requirement 5: Rejects missing, duplicate, unknown, and blank answers before submission."""
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        # Create dedicated test user
+        email = f"validator.{int(datetime.utcnow().timestamp())}@company.com"
+        await client.post("/api/v1/auth/register", json={
+            "name": "Validator Employee",
+            "email": email,
+            "password": "Password@123",
+            "role": "employee"
+        })
+        r_log = await client.post("/api/v1/auth/login", json={"email": email, "password": "Password@123"})
+        headers = {"Authorization": f"Bearer {r_log.json()['access_token']}"}
+
+        # Create draft report
+        r_draft = await client.post("/api/v1/reports/draft", headers=headers, json={
+            "week_start_date": "2026-11-09",
+            "week_end_date": "2026-11-15",
+            "answers": []
+        })
+        report_id = r_draft.json()["id"]
+
+        # 1. Missing answers (< 4)
+        r_sub_missing = await client.post(f"/api/v1/reports/{report_id}/submit", headers=headers, json={
+            "answers": [
+                {"question_key": "accomplishments", "question_text": "q1", "answer": "Done"}
+            ]
+        })
+        assert r_sub_missing.status_code == 400
+        assert "4" in r_sub_missing.json()["detail"]
+
+        # 2. Duplicate question key
+        r_sub_dup = await client.post(f"/api/v1/reports/{report_id}/submit", headers=headers, json={
+            "answers": [
+                {"question_key": "accomplishments", "question_text": "q1", "answer": "Done"},
+                {"question_key": "accomplishments", "question_text": "q1 dup", "answer": "Done again"},
+                {"question_key": "in_progress", "question_text": "q2", "answer": "Ongoing"},
+                {"question_key": "blockers", "question_text": "q3", "answer": "None"}
+            ]
+        })
+        assert r_sub_dup.status_code == 400
+        assert "Duplicate" in r_sub_dup.json()["detail"]
+
+        # 3. Unknown question key
+        r_sub_unknown = await client.post(f"/api/v1/reports/{report_id}/submit", headers=headers, json={
+            "answers": [
+                {"question_key": "accomplishments", "question_text": "q1", "answer": "Done"},
+                {"question_key": "in_progress", "question_text": "q2", "answer": "Ongoing"},
+                {"question_key": "blockers", "question_text": "q3", "answer": "None"},
+                {"question_key": "favorite_food", "question_text": "q4", "answer": "Pizza"}
+            ]
+        })
+        assert r_sub_unknown.status_code == 400
+        assert "Unknown" in r_sub_unknown.json()["detail"]
+
+        # 4. Blank answer
+        r_sub_blank = await client.post(f"/api/v1/reports/{report_id}/submit", headers=headers, json={
+            "answers": [
+                {"question_key": "accomplishments", "question_text": "q1", "answer": "Done"},
+                {"question_key": "in_progress", "question_text": "q2", "answer": "   "},
+                {"question_key": "blockers", "question_text": "q3", "answer": "None"},
+                {"question_key": "priorities", "question_text": "q4", "answer": "Sprint plan"}
+            ]
+        })
+        assert r_sub_blank.status_code == 400
+        assert "blank" in r_sub_blank.json()["detail"]
+
+        # 5. All 4 valid answers -> Success
+        r_sub_valid = await client.post(f"/api/v1/reports/{report_id}/submit", headers=headers, json={
+            "answers": [
+                {"question_key": "accomplishments", "question_text": "q1", "answer": "Built core features"},
+                {"question_key": "in_progress", "question_text": "q2", "answer": "Writing automated tests"},
+                {"question_key": "blockers", "question_text": "q3", "answer": "No blockers currently"},
+                {"question_key": "priorities", "question_text": "q4", "answer": "Release MVP to production"}
+            ]
+        })
+        assert r_sub_valid.status_code == 200
+        assert r_sub_valid.json()["status"] == "submitted"
+
+@pytest.mark.anyio
+async def test_work_update_mutation_concurrency_guard():
+    """Requirement 6: Work updates cannot be mutated while report is submitting or submitted."""
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        # Create employee
+        email = f"concur.{int(datetime.utcnow().timestamp())}@company.com"
+        await client.post("/api/v1/auth/register", json={
+            "name": "Concurrency User",
+            "email": email,
+            "password": "Password@123",
+            "role": "employee"
+        })
+        r_log = await client.post("/api/v1/auth/login", json={"email": email, "password": "Password@123"})
+        headers = {"Authorization": f"Bearer {r_log.json()['access_token']}"}
+
+        # 1. Create a work update
+        r_up = await client.post("/api/v1/updates", headers=headers, json={
+            "date": "2026-11-10",
+            "title": "Task 1",
+            "description": "Initial update",
+            "category": "Feature",
+            "hours_spent": 3.0
+        })
+        assert r_up.status_code == 201
+        update_id = r_up.json()["id"]
+
+        # 2. Create draft report and set status to submitting in db
+        db = get_database()
+        cur_user = await db.users.find_one({"email": email})
+        rep_id = ObjectId()
+        await db.weekly_reports.insert_one({
+            "_id": rep_id,
+            "user_id": str(cur_user["_id"]),
+            "week_start_date": "2026-11-09",
+            "week_end_date": "2026-11-15",
+            "status": "submitting",
+            "answers": []
+        })
+
+        # 3. Attempting to add a new update for that week must be rejected
+        r_add = await client.post("/api/v1/updates", headers=headers, json={
+            "date": "2026-11-11",
+            "title": "Raced Update",
+            "description": "Should fail",
+            "category": "Feature",
+            "hours_spent": 2.0
+        })
+        assert r_add.status_code == 400
+        assert "submitting" in r_add.json()["detail"]
+
+        # 4. Attempting to edit existing update must be rejected
+        r_edit = await client.put(f"/api/v1/updates/{update_id}", headers=headers, json={
+            "title": "Modified Title"
+        })
+        assert r_edit.status_code == 400
+        assert "submitting" in r_edit.json()["detail"]
+
+        # 5. Attempting to delete existing update must be rejected
+        r_del = await client.delete(f"/api/v1/updates/{update_id}", headers=headers)
+        assert r_del.status_code == 400
+        assert "submitting" in r_del.json()["detail"]
+
+@pytest.mark.anyio
+async def test_manager_team_assignment_and_unassign():
+    """Requirement 7: Manager can view unassigned employees, unassign, and reassign team members."""
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        # Login as manager
+        r_mgr = await client.post("/api/v1/auth/login", json={"email": "manager@company.com", "password": "Manager@123"})
+        mgr_headers = {"Authorization": f"Bearer {r_mgr.json()['access_token']}"}
+        mgr_id = r_mgr.json()["user"]["id"]
+
+        # Create a new employee assigned to this manager
+        emp_email = f"teammate.{int(datetime.utcnow().timestamp())}@company.com"
+        await client.post("/api/v1/auth/register", json={
+            "name": "Team Mate",
+            "email": emp_email,
+            "password": "Password@123",
+            "role": "employee",
+            "manager_id": mgr_id
+        })
+        db = get_database()
+        emp_doc = await db.users.find_one({"email": emp_email})
+        emp_id = str(emp_doc["_id"])
+
+        # Manager unassigns employee
+        r_unassign = await client.post(f"/api/v1/manager/employees/{emp_id}/unassign", headers=mgr_headers)
+        assert r_unassign.status_code == 200
+        emp_unassigned = await db.users.find_one({"_id": emp_doc["_id"]})
+        assert emp_unassigned["manager_id"] is None
+
+        # Employee appears in unassigned employees
+        r_unassigned_list = await client.get("/api/v1/manager/unassigned-employees", headers=mgr_headers)
+        assert r_unassigned_list.status_code == 200
+        unassigned_ids = [e["id"] for e in r_unassigned_list.json()]
+        assert emp_id in unassigned_ids
+
+        # Manager reassigns employee
+        r_reassign = await client.post(f"/api/v1/manager/employees/{emp_id}/assign", headers=mgr_headers)
+        assert r_reassign.status_code == 200
+        emp_reassigned = await db.users.find_one({"_id": emp_doc["_id"]})
+        assert emp_reassigned["manager_id"] == mgr_id
