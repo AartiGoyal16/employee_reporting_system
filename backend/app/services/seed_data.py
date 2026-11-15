@@ -34,16 +34,26 @@ DEFAULT_QUESTIONS = [
 ]
 
 async def seed_database(db):
-    user_count = await db.users.count_documents({})
-    if user_count > 0:
-        logger.info("Database already seeded. Skipping initial seeding.")
+    from app.config import settings
+
+    # 1. Independent Question Seeding: Ensure all standard questions exist
+    for q in DEFAULT_QUESTIONS:
+        existing_q = await db.questions.find_one({"key": q["key"]})
+        if not existing_q:
+            await db.questions.insert_one(dict(q))
+
+    # 2. Demo users seeding: strictly conditional on environment configuration
+    if not settings.ENABLE_DEMO_USERS or settings.ENVIRONMENT.lower() == "production":
+        logger.info("Demo user seeding is disabled in this environment.")
         return
 
-    logger.info("Seeding database with demo users, questions, work updates, and sample reports...")
+    # Check if demo users already exist
+    existing_demo = await db.users.find_one({"email": "manager@company.com"})
+    if existing_demo:
+        logger.info("Demo users already present. Skipping demo user seeding.")
+        return
 
-    # 1. Seed Questions
-    for q in DEFAULT_QUESTIONS:
-        await db.questions.insert_one(q)
+    logger.info("Seeding database with demo users, work updates, and sample reports...")
 
     # 2. Seed Managers
     manager1_id = ObjectId()
@@ -216,6 +226,18 @@ async def seed_database(db):
         "week_start_date": last_monday.strftime("%Y-%m-%d"),
         "week_end_date": last_sunday.strftime("%Y-%m-%d"),
         "work_update_ids": [str(u["_id"]) for u in alex_updates],
+        "work_updates_snapshot": [
+            {
+                "id": str(u["_id"]),
+                "user_id": u["user_id"],
+                "date": u["date"],
+                "title": u["title"],
+                "description": u["description"],
+                "category": u.get("category", "Feature"),
+                "hours_spent": u.get("hours_spent")
+            }
+            for u in alex_updates
+        ],
         "answers": alex_answers,
         "status": "submitted",
         "submitted_at": datetime.utcnow() - timedelta(days=1),
@@ -293,6 +315,18 @@ async def seed_database(db):
         "week_start_date": last_monday.strftime("%Y-%m-%d"),
         "week_end_date": last_sunday.strftime("%Y-%m-%d"),
         "work_update_ids": [str(u["_id"]) for u in priya_updates],
+        "work_updates_snapshot": [
+            {
+                "id": str(u["_id"]),
+                "user_id": u["user_id"],
+                "date": u["date"],
+                "title": u["title"],
+                "description": u["description"],
+                "category": u.get("category", "Feature"),
+                "hours_spent": u.get("hours_spent")
+            }
+            for u in priya_updates
+        ],
         "answers": priya_answers,
         "status": "submitted",
         "submitted_at": datetime.utcnow() - timedelta(hours=14),

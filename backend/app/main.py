@@ -1,7 +1,7 @@
 import logging
 import asyncio
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
 from app.database import db_manager, get_database
@@ -26,12 +26,19 @@ async def lifespan(app: FastAPI):
         await seed_database(db)
     except Exception as e:
         logger.error(f"Error during auto-seeding: {e}")
-    # Launch background deadline reminder scheduler
-    reminder_task = asyncio.create_task(start_reminder_scheduler())
+    # Launch background deadline reminder scheduler if enabled
+    reminder_task = None
+    if settings.ENABLE_REMINDER_SCHEDULER:
+        reminder_task = asyncio.create_task(start_reminder_scheduler())
     yield
     # Shutdown
     logger.info("Shutting down application...")
-    reminder_task.cancel()
+    if reminder_task:
+        reminder_task.cancel()
+        try:
+            await reminder_task
+        except (asyncio.CancelledError, Exception):
+            pass
     await db_manager.close_database_connection()
 
 app = FastAPI(
@@ -69,8 +76,20 @@ async def root():
 
 @app.get("/health", tags=["Health"])
 async def health_check():
-    db = get_database()
+    is_healthy = await db_manager.ping_database()
+    if not is_healthy:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "status": "unhealthy",
+                "database": "disconnected",
+                "environment": settings.ENVIRONMENT,
+                "error": "Database connectivity check failed"
+            }
+        )
     return {
         "status": "healthy",
+        "service": settings.PROJECT_NAME,
+        "environment": settings.ENVIRONMENT,
         "database": "mock_in_memory" if db_manager.is_mock else "mongodb_connected"
     }

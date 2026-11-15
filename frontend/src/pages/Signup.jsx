@@ -179,30 +179,17 @@ export const Signup = () => {
       {/* Form Card */}
       <div className="sm:mx-auto sm:w-full sm:max-w-lg z-10 px-4 sm:px-0">
         <div className="bg-white/95 backdrop-blur-xl shadow-2xl rounded-2xl border border-white/20 overflow-hidden">
-          {/* Role tabs */}
-          <div className="flex border-b border-slate-200">
-            {[
-              { key: 'employee', label: '👤 Register as Employee' },
-              { key: 'manager', label: '🏢 Register as Manager' },
-            ].map(({ key, label }) => (
-              <button
-                key={key}
-                type="button"
-                onClick={() => {
-                  setFormData((prev) => ({ ...prev, role: key, manager_id: '' }));
-                  setErrors((prev) => ({ ...prev, manager_id: '' }));
-                }}
-                className={`flex-1 py-3 text-xs sm:text-sm font-semibold tracking-wide transition-colors ${
-                  formData.role === key
-                    ? key === 'manager'
-                      ? 'bg-purple-50 text-purple-700 border-b-2 border-purple-600'
-                      : 'bg-blue-50 text-blue-700 border-b-2 border-blue-600'
-                    : 'text-slate-500 hover:text-slate-700 hover:bg-slate-50'
-                }`}
-              >
-                {label}
-              </button>
-            ))}
+          {/* Header banner */}
+          <div className="bg-blue-50/70 border-b border-blue-100 px-6 py-3.5 flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <span className="w-2 h-2 rounded-full bg-blue-600 animate-pulse" />
+              <span className="text-xs font-bold uppercase tracking-wider text-blue-900">
+                Employee Registration
+              </span>
+            </div>
+            <span className="text-[11px] text-slate-500 font-medium">
+              Manager accounts provisioned administratively
+            </span>
           </div>
 
           <form onSubmit={handleSubmit} className="p-6 space-y-4">

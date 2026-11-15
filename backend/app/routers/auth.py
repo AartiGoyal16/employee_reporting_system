@@ -2,6 +2,7 @@ from fastapi import APIRouter, HTTPException, status, Depends
 from datetime import datetime
 from bson import ObjectId
 from app.database import get_database
+from app.config import settings
 from app.models.user import UserLogin, TokenResponse, UserResponse, RegisterRequest
 from app.auth.security import verify_password, get_password_hash
 from app.auth.jwt import create_access_token
@@ -49,7 +50,8 @@ async def register(payload: RegisterRequest):
         resolved_manager_id = str(manager["_id"])
         resolved_manager_name = manager["name"]
 
-    # 3. Create user document
+    # 3. Security: Public registration ALWAYS creates employee role
+    account_role = "employee"
     new_id = ObjectId()
     now = datetime.utcnow()
     user_doc = {
@@ -57,7 +59,7 @@ async def register(payload: RegisterRequest):
         "email": email_clean,
         "name": payload.name.strip(),
         "hashed_password": get_password_hash(payload.password),
-        "role": payload.role,
+        "role": account_role,
         "department": payload.department or "Engineering",
         "manager_id": resolved_manager_id,
         "created_at": now,
@@ -69,7 +71,7 @@ async def register(payload: RegisterRequest):
     token = create_access_token(data={
         "sub": user_id_str,
         "email": email_clean,
-        "role": payload.role,
+        "role": account_role,
         "name": payload.name.strip()
     })
 
@@ -77,7 +79,7 @@ async def register(payload: RegisterRequest):
         id=user_id_str,
         email=email_clean,
         name=payload.name.strip(),
-        role=payload.role,
+        role=account_role,
         department=payload.department or "Engineering",
         manager_id=resolved_manager_id,
         created_at=now
@@ -146,7 +148,12 @@ async def get_my_profile(current_user: dict = Depends(get_current_user)):
 
 @router.get("/demo-users")
 async def get_demo_users():
-    """Returns sample pre-seeded users for demo testing."""
+    """Returns sample pre-seeded users for demo testing in development environments only."""
+    if not settings.ENABLE_DEMO_USERS or settings.ENVIRONMENT.lower() == "production":
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Demo users endpoint is disabled in production."
+        )
     return [
         {
             "role": "manager",

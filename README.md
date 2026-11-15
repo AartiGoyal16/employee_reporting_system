@@ -15,9 +15,10 @@ An enterprise-grade, backend-focused full-stack MVP built for the Technical Asse
   - Four Weekly Reflection Questions with draft saving and auto-recovery.
   - One-click report submission locking the report into immutable **Read-Only** mode.
 - **Free-Tier AI Integration with Multi-Tier Fallback & Retry**:
-  - Primary: **Google Gemini 1.5 Flash** (Free Tier).
+  - Primary: **Google Gemini 2.5 Flash** (Free Tier via Google AI Studio).
   - Secondary: **Groq Llama-3.1-8b** (Free Tier).
-  - Resilient Fallback: Built-in intelligent NLP heuristic engine ensuring 100% submission reliability even if external APIs or network connectivity are offline.
+  - Resilient Fallback: Built-in deterministic NLP heuristic engine ensuring 100% submission reliability even if external APIs or network connectivity are offline.
+  - Zero Hallucination Guardrails: Prompts strictly constrain output to actual logged work updates and weekly answers without inventing unperformed tasks.
 - **Bonus Capabilities Included**:
   - 📄 **PDF Generation & Export**: Download official executive report PDFs with branded headers, meta table, AI summary card, question reflections, and daily logs.
   - 🔁 **AI Retry Logic**: Exponential backoff with 2 retries for transient API network hiccups.
@@ -46,9 +47,9 @@ No external SSO or HR integration is required. The system auto-seeds realistic d
 ## 🛠️ Tech Stack
 
 - **Backend**: Python 3.11+ / FastAPI / Uvicorn / Pydantic v2 / PyJWT / Bcrypt / ReportLab
-- **Database**: MongoDB / MongoDB Atlas (with in-memory async mock auto-detection for instant local testability)
+- **Database**: MongoDB / MongoDB Atlas (with in-memory async mock auto-detection for local testing)
 - **Frontend**: React 18 / Vite / Tailwind CSS / Lucide React / Axios / React Router v6
-- **AI Provider**: Google Gemini 1.5 Flash API (free tier) + Groq Llama-3.1 + NLP Heuristic Fallback
+- **AI Provider**: Google Gemini 2.5 Flash API (free tier) + Groq Llama-3.1 + Deterministic Heuristic Fallback
 - **Deployment**: Vercel (Frontend SPA) + Render (FastAPI Web Service)
 
 ---
@@ -124,8 +125,11 @@ pip install -r requirements.txt
 cp .env.example .env
 # Edit .env to add your GEMINI_API_KEY (optional: system has full NLP fallback if left blank)
 
-# Run backend test suite
-python test_runner.py
+# Run backend comprehensive test suite
+pytest -c backend/pytest.ini backend/tests/test_comprehensive.py -v
+
+# Run legacy API test suite
+pytest -c backend/pytest.ini backend/tests/test_api.py -v
 
 # Start FastAPI development server
 uvicorn app.main:app --reload --port 8000
@@ -144,6 +148,9 @@ cd frontend
 
 # Install npm dependencies
 npm install
+
+# Run frontend test suite
+npm test
 
 # Start Vite development server
 npm run dev
@@ -178,11 +185,12 @@ Open your browser at `http://localhost:5173`.
 
 ## 🤖 AI Model Selection & Resilience Note
 
-- **Primary Model**: **Google Gemini 1.5 Flash** via Google AI Studio API (`gemini-1.5-flash`).
-  - *Why selected*: Google Gemini 1.5 Flash provides a generous free tier (15 requests/min), state-of-the-art context window, low latency, and structured JSON generation mode.
-- **Secondary Provider**: **Groq Llama-3.1-8b-instant** free tier.
-- **Fail-Safe Heuristic Engine**: If no API key is supplied or external provider rate limits occur, the built-in intelligent NLP heuristic engine parses work categories, logged hours, completed milestones, and blockers to synthesize the executive summary and manager recommendation.
+- **Primary Model**: **Google Gemini 2.5 Flash** (`gemini-2.5-flash`, configurable via `GEMINI_MODEL`).
+  - *Why selected*: Google Gemini 2.5 Flash is actively supported on the free tier according to Google's official Gemini API documentation, providing high speed, structured JSON generation, and a generous context window. The predecessor `gemini-1.5-flash` is deprecated.
+  - *Fallback*: Secondary fallback to Groq Llama-3.1 (`llama-3.1-8b-instant`) free tier.
+- **Fail-Safe Heuristic Engine**: If no API key is supplied or external provider rate limits/timeouts occur, the built-in deterministic NLP heuristic engine parses work categories, logged hours, completed milestones, and blockers to synthesize the executive summary and manager recommendation. Output is strictly marked with `model_used: "Deterministic Heuristic Fallback (Local)"`.
 - **Retry Mechanism**: The system automatically executes exponential retries on transient connection timeouts.
+- **Security & Guardrails**: The API key is sent via standard HTTP header `x-goog-api-key` (never exposed in query parameters or logged); the prompt explicitly instructs the LLM not to invent tasks or embellish outside the provided updates.
 
 ---
 

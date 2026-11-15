@@ -3,6 +3,7 @@ Email Service — smtplib-based, zero extra dependencies.
 Falls back gracefully to log-only mode when SMTP vars are not configured.
 """
 import logging
+import os
 import smtplib
 import asyncio
 from email.mime.multipart import MIMEMultipart
@@ -23,6 +24,10 @@ def _build_html(subject: str, body_html: str) -> MIMEMultipart:
 
 def _send_sync(to_email: str, msg: MIMEMultipart) -> bool:
     """Blocking SMTP send — called in a thread pool so it won't block the event loop."""
+    if os.getenv("TESTING") == "1" or settings.ENVIRONMENT.lower() == "test":
+        logger.info(f"[TESTING] Simulated sending '{msg['Subject']}' to {to_email}")
+        return True
+
     host = settings.SMTP_HOST
     port = settings.SMTP_PORT
     user = settings.SMTP_USER

@@ -28,7 +28,26 @@ def get_current_week_boundaries():
     return monday.strftime("%Y-%m-%d"), sunday.strftime("%Y-%m-%d")
 
 async def populate_report_details(report: dict, db) -> dict:
-    # 1. Fetch work updates for this employee in the report's date range
+    # 1. If report is submitted and has an immutable snapshot, use the snapshot for historical consistency
+    if report.get("status") == "submitted" and report.get("work_updates_snapshot"):
+        updates_res = []
+        for u in report["work_updates_snapshot"]:
+            updates_res.append(WorkUpdateResponse(
+                id=str(u.get("id") or u.get("_id", "")),
+                user_id=u["user_id"],
+                date=u["date"],
+                title=u["title"],
+                description=u["description"],
+                category=u.get("category", "Feature"),
+                hours_spent=u.get("hours_spent"),
+                created_at=u.get("created_at") or datetime.utcnow(),
+                updated_at=u.get("updated_at") or datetime.utcnow()
+            ))
+        report["work_updates"] = updates_res
+        report["id"] = str(report["_id"])
+        return report
+
+    # 2. Otherwise (draft or pre-snapshot), fetch work updates for this employee in the report's date range
     cursor = db.work_updates.find({
         "user_id": report["user_id"],
         "date": {"$gte": report["week_start_date"], "$lte": report["week_end_date"]}
@@ -236,82 +255,113 @@ async def submit_weekly_report(
 ):
     """
     Submits weekly report:
-    1. Validates report exists and belongs to current user.
-    2. Validates it is not already submitted (immutable once submitted).
-    3. Fetches all weekly work updates.
-    4. Generates structured AI summary (Gemini / Groq / NLP fallback with retries).
-    5. Locks report to 'submitted'.
-    6. Logs automated manager notification (Bonus feature).
+    1. Atomic conditional lock from 'draft' to 'submitting' to prevent concurrent submissions.
+    2. Snapshots all weekly work updates for historical immutability.
+    3. Generates structured AI summary (Gemini / Groq / NLP fallback with retries).
+    4. Locks report to 'submitted'.
+    5. Dispatches manager notification.
     """
+    import os
     db = get_database()
     try:
         r_oid = ObjectId(report_id)
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid report ID format")
 
-    report = await db.weekly_reports.find_one({"_id": r_oid})
-    if not report:
-        raise HTTPException(status_code=404, detail="Weekly report not found")
+    # Atomic conditional lock: only a draft report owned by current_user can be claimed
+    claimed = await db.weekly_reports.find_one_and_update(
+        {"_id": r_oid, "user_id": current_user["id"], "status": "draft"},
+        {"$set": {"status": "submitting", "submission_started_at": datetime.utcnow()}}
+    )
 
-    if report["user_id"] != current_user["id"]:
-        raise HTTPException(status_code=403, detail="Forbidden: You cannot submit reports for another employee")
+    if not claimed:
+        # Investigate rejection reason
+        existing = await db.weekly_reports.find_one({"_id": r_oid})
+        if not existing:
+            raise HTTPException(status_code=404, detail="Weekly report not found")
+        if existing["user_id"] != current_user["id"]:
+            raise HTTPException(status_code=403, detail="Forbidden: You cannot submit reports for another employee")
+        if existing.get("status") == "submitted":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="This report has already been submitted and is read-only."
+            )
+        if existing.get("status") == "submitting":
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Report submission is already in progress. Please wait a moment."
+            )
+        raise HTTPException(status_code=400, detail="Report cannot be submitted in its current state")
 
-    if report.get("status") == "submitted":
+    report = claimed
+
+    try:
+        # Update answers if supplied in payload
+        answers = [a.dict() for a in submit_payload.answers] if (submit_payload and submit_payload.answers is not None) else report.get("answers", [])
+
+        # Fetch daily work updates for the report's week and build immutable snapshot
+        cursor = db.work_updates.find({
+            "user_id": current_user["id"],
+            "date": {"$gte": report["week_start_date"], "$lte": report["week_end_date"]}
+        }).sort("date", 1)
+        work_updates = await cursor.to_list(length=100)
+
+        work_update_ids = [str(u["_id"]) for u in work_updates]
+        snapshot = [
+            {
+                "id": str(u["_id"]),
+                "user_id": u["user_id"],
+                "date": u["date"],
+                "title": u["title"],
+                "category": u.get("category", "Feature"),
+                "description": u["description"],
+                "hours_spent": u.get("hours_spent"),
+                "created_at": u.get("created_at"),
+                "updated_at": u.get("updated_at")
+            }
+            for u in work_updates
+        ]
+
+        # Prepare data for AI summary generator
+        report_ai_payload = {
+            "user_name": current_user["name"],
+            "week_start_date": report["week_start_date"],
+            "week_end_date": report["week_end_date"],
+            "work_updates": snapshot,
+            "answers": answers
+        }
+
+        # Generate AI summary with retry and fallback
+        ai_summary_dict = await generate_ai_summary_with_retry(report_ai_payload, max_retries=2)
+
+        now = datetime.utcnow()
+        update_fields = {
+            "answers": answers,
+            "work_update_ids": work_update_ids,
+            "work_updates_snapshot": snapshot,
+            "status": "submitted",
+            "submitted_at": now,
+            "ai_summary": ai_summary_dict,
+            "updated_at": now
+        }
+
+        await db.weekly_reports.update_one({"_id": r_oid}, {"$set": update_fields})
+    except Exception as exc:
+        logger.error(f"Error during report submission for {report_id}: {exc}. Reverting to draft.")
+        await db.weekly_reports.update_one(
+            {"_id": r_oid, "status": "submitting"},
+            {"$set": {"status": "draft"}}
+        )
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="This report has already been submitted and is read-only."
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Report submission failed: {str(exc)}"
         )
 
-    # Update answers if supplied in payload
-    if submit_payload and submit_payload.answers is not None:
-        report["answers"] = [a.dict() for a in submit_payload.answers]
-
-    # Fetch daily work updates for the report's week
-    cursor = db.work_updates.find({
-        "user_id": current_user["id"],
-        "date": {"$gte": report["week_start_date"], "$lte": report["week_end_date"]}
-    }).sort("date", 1)
-    work_updates = await cursor.to_list(length=100)
-
-    work_update_ids = [str(u["_id"]) for u in work_updates]
-    serialized_updates = [
-        {
-            "date": u["date"],
-            "title": u["title"],
-            "category": u.get("category", "Feature"),
-            "description": u["description"],
-            "hours_spent": u.get("hours_spent")
-        }
-        for u in work_updates
-    ]
-
-    # Prepare data for AI summary generator
-    report_ai_payload = {
-        "user_name": current_user["name"],
-        "week_start_date": report["week_start_date"],
-        "week_end_date": report["week_end_date"],
-        "work_updates": serialized_updates,
-        "answers": report.get("answers", [])
-    }
-
-    # Generate AI summary with retry and fallback
-    ai_summary_dict = await generate_ai_summary_with_retry(report_ai_payload, max_retries=2)
-
-    now = datetime.utcnow()
-    update_fields = {
-        "answers": report.get("answers", []),
-        "work_update_ids": work_update_ids,
-        "status": "submitted",
-        "submitted_at": now,
-        "ai_summary": ai_summary_dict,
-        "updated_at": now
-    }
-
-    await db.weekly_reports.update_one({"_id": r_oid}, {"$set": update_fields})
     updated_report = await db.weekly_reports.find_one({"_id": r_oid})
 
     # Automated manager notification (Bonus feature: Email manager upon submission)
     manager_id = report.get("manager_id")
+    is_test = os.getenv("TESTING") == "1"
     if manager_id:
         try:
             try:
@@ -321,15 +371,18 @@ async def submit_weekly_report(
             manager = await db.users.find_one({"_id": m_oid})
             if manager and manager.get("email"):
                 highlights = ai_summary_dict.get("key_highlights", []) if ai_summary_dict else []
-                await send_manager_notification_email(
-                    manager_email=manager["email"],
-                    manager_name=manager.get("name", "Manager"),
-                    employee_name=current_user.get("name", "Employee"),
-                    week_start=report["week_start_date"],
-                    week_end=report["week_end_date"],
-                    ai_highlights=highlights,
-                    report_id=str(r_oid),
-                )
+                if is_test:
+                    logger.info(f"[TESTING] Suppressed email to manager {manager['email']}")
+                else:
+                    await send_manager_notification_email(
+                        manager_email=manager["email"],
+                        manager_name=manager.get("name", "Manager"),
+                        employee_name=current_user.get("name", "Employee"),
+                        week_start=report["week_start_date"],
+                        week_end=report["week_end_date"],
+                        ai_highlights=highlights,
+                        report_id=str(r_oid),
+                    )
             else:
                 logger.info(f"Manager {manager_id} has no registered email. Skipped notification.")
         except Exception as e:

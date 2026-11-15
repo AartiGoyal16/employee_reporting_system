@@ -16,9 +16,16 @@ class RegisterRequest(BaseModel):
     name: str = Field(..., min_length=2, max_length=100, description="Full name")
     email: EmailStr
     password: str = Field(..., min_length=6, description="Password (min 6 characters)")
-    role: Literal['employee', 'manager'] = Field(..., description="Account role: 'employee' or 'manager'")
+    role: Optional[str] = Field("employee", description="Role (public registration is restricted to 'employee')")
     department: Optional[str] = Field("Engineering", description="Department / team name")
-    manager_id: Optional[str] = Field(None, description="Manager's user ID (required for employees if selecting a manager)")
+    manager_id: Optional[str] = Field(None, description="Manager's user ID (optional: select assigned manager)")
+
+    @field_validator('role')
+    @classmethod
+    def validate_role_is_employee(cls, v):
+        if v and v.strip().lower() != "employee":
+            raise ValueError("Public registration is restricted to 'employee' role only. Manager accounts must be provisioned administratively.")
+        return "employee"
 
     @field_validator('password')
     @classmethod

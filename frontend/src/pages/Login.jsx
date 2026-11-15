@@ -34,10 +34,10 @@ export const Login = () => {
   }, [isAuthenticated, role, navigate]);
 
   useEffect(() => {
-    // Fetch demo users for 1-click evaluation
+    // Fetch demo users for 1-click evaluation (available in development mode)
     authService.getDemoUsers()
-      .then((res) => setDemoUsers(res.data))
-      .catch((err) => console.error("Could not fetch demo users:", err));
+      .then((res) => setDemoUsers(res.data || []))
+      .catch(() => setDemoUsers([]));
   }, []);
 
   const handleLogin = async (e) => {
@@ -157,56 +157,58 @@ export const Login = () => {
             </div>
           </form>
 
-          {/* Quick Demo Switcher Section */}
-          <div className="mt-8 pt-6 border-t border-slate-200">
-            <div className="flex items-center justify-between mb-3">
-              <span className="text-xs font-bold uppercase tracking-wider text-slate-500 flex items-center gap-1.5">
-                <Sparkles className="w-3.5 h-3.5 text-amber-500" />
-                Quick 1-Click Demo Logins
-              </span>
-              <span className="text-[10px] bg-slate-100 text-slate-600 px-2 py-0.5 rounded-full font-medium">
-                No typing required
-              </span>
-            </div>
+          {/* Quick Demo Switcher Section (visible in development only) */}
+          {demoUsers && demoUsers.length > 0 && (
+            <div className="mt-8 pt-6 border-t border-slate-200">
+              <div className="flex items-center justify-between mb-3">
+                <span className="text-xs font-bold uppercase tracking-wider text-slate-500 flex items-center gap-1.5">
+                  <Sparkles className="w-3.5 h-3.5 text-amber-500" />
+                  Quick 1-Click Demo Logins
+                </span>
+                <span className="text-[10px] bg-slate-100 text-slate-600 px-2 py-0.5 rounded-full font-medium">
+                  No typing required
+                </span>
+              </div>
 
-            <div className="space-y-2">
-              {demoUsers.map((u) => {
-                const isMgr = u.role === 'manager';
-                return (
-                  <button
-                    key={u.email}
-                    type="button"
-                    onClick={() => handleQuickLogin(u)}
-                    className="w-full p-2.5 text-left rounded-xl border border-slate-200 hover:border-blue-400 hover:bg-blue-50/50 flex items-center justify-between group transition-all"
-                  >
-                    <div className="flex items-center gap-2.5">
-                      <div className={`w-8 h-8 rounded-lg flex items-center justify-center text-xs font-bold ${
-                        isMgr 
-                          ? 'bg-purple-100 text-purple-700' 
-                          : 'bg-blue-100 text-blue-700'
-                      }`}>
-                        {u.name.charAt(0)}
-                      </div>
-                      <div>
-                        <div className="text-xs font-semibold text-slate-800 flex items-center gap-1.5">
-                          <span>{u.name}</span>
-                          <span className={`text-[10px] font-semibold px-1.5 py-0.2 rounded uppercase ${
-                            isMgr 
-                              ? 'bg-purple-50 text-purple-700' 
-                              : 'bg-blue-50 text-blue-700'
-                          }`}>
-                            {u.role}
-                          </span>
+              <div className="space-y-2">
+                {demoUsers.map((u) => {
+                  const isMgr = u.role === 'manager';
+                  return (
+                    <button
+                      key={u.email}
+                      type="button"
+                      onClick={() => handleQuickLogin(u)}
+                      className="w-full p-2.5 text-left rounded-xl border border-slate-200 hover:border-blue-400 hover:bg-blue-50/50 flex items-center justify-between group transition-all"
+                    >
+                      <div className="flex items-center gap-2.5">
+                        <div className={`w-8 h-8 rounded-lg flex items-center justify-center text-xs font-bold ${
+                          isMgr 
+                            ? 'bg-purple-100 text-purple-700' 
+                            : 'bg-blue-100 text-blue-700'
+                        }`}>
+                          {u.name.charAt(0)}
                         </div>
-                        <div className="text-[11px] text-slate-500">{u.description}</div>
+                        <div>
+                          <div className="text-xs font-semibold text-slate-800 flex items-center gap-1.5">
+                            <span>{u.name}</span>
+                            <span className={`text-[10px] font-semibold px-1.5 py-0.2 rounded uppercase ${
+                              isMgr 
+                                ? 'bg-purple-50 text-purple-700' 
+                                : 'bg-blue-50 text-blue-700'
+                            }`}>
+                              {u.role}
+                            </span>
+                          </div>
+                          <div className="text-[11px] text-slate-500">{u.description}</div>
+                        </div>
                       </div>
-                    </div>
-                    <ChevronRight className="w-4 h-4 text-slate-400 group-hover:text-blue-600 group-hover:translate-x-0.5 transition-all" />
-                  </button>
-                );
-              })}
+                      <ChevronRight className="w-4 h-4 text-slate-400 group-hover:text-blue-600 group-hover:translate-x-0.5 transition-all" />
+                    </button>
+                  );
+                })}
+              </div>
             </div>
-          </div>
+          )}
         </div>
 
         <div className="mt-6 text-center text-xs text-slate-400">

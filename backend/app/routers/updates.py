@@ -53,6 +53,20 @@ async def create_work_update(
 ):
     """Create a new daily work update."""
     db = get_database()
+
+    # Integrity check: prevent logging updates for weeks whose reports have already been submitted
+    submitted_report = await db.weekly_reports.find_one({
+        "user_id": current_user["id"],
+        "status": "submitted",
+        "week_start_date": {"$lte": update_data.date},
+        "week_end_date": {"$gte": update_data.date}
+    })
+    if submitted_report:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Cannot add work update for {update_data.date}: weekly report for {submitted_report['week_start_date']} to {submitted_report['week_end_date']} has already been submitted and is immutable."
+        )
+
     now = datetime.utcnow()
     doc = {
         "_id": ObjectId(),
@@ -130,6 +144,33 @@ async def edit_work_update(
     if doc["user_id"] != current_user["id"]:
         raise HTTPException(status_code=403, detail="Forbidden: You can only edit your own work updates")
 
+    # Integrity check: prevent editing updates that are part of an already submitted weekly report
+    submitted_report = await db.weekly_reports.find_one({
+        "user_id": current_user["id"],
+        "status": "submitted",
+        "week_start_date": {"$lte": doc["date"]},
+        "week_end_date": {"$gte": doc["date"]}
+    })
+    if submitted_report:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Cannot edit work update: the weekly report for {submitted_report['week_start_date']} to {submitted_report['week_end_date']} has already been submitted and is read-only."
+        )
+
+    # Check target date if date is being modified
+    if update_data.date and update_data.date != doc["date"]:
+        submitted_target = await db.weekly_reports.find_one({
+            "user_id": current_user["id"],
+            "status": "submitted",
+            "week_start_date": {"$lte": update_data.date},
+            "week_end_date": {"$gte": update_data.date}
+        })
+        if submitted_target:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Cannot move work update to {update_data.date}: that week's report has already been submitted."
+            )
+
     set_fields = {k: v for k, v in update_data.dict().items() if v is not None}
     set_fields["updated_at"] = datetime.utcnow()
 
@@ -166,6 +207,19 @@ async def delete_work_update(
 
     if doc["user_id"] != current_user["id"]:
         raise HTTPException(status_code=403, detail="Forbidden: You can only delete your own work updates")
+
+    # Integrity check: prevent deleting updates that are part of an already submitted weekly report
+    submitted_report = await db.weekly_reports.find_one({
+        "user_id": current_user["id"],
+        "status": "submitted",
+        "week_start_date": {"$lte": doc["date"]},
+        "week_end_date": {"$gte": doc["date"]}
+    })
+    if submitted_report:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Cannot delete work update: the weekly report for {submitted_report['week_start_date']} to {submitted_report['week_end_date']} has already been submitted and is read-only."
+        )
 
     await db.work_updates.delete_one({"_id": oid})
     return None
