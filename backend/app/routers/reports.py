@@ -12,7 +12,7 @@ from app.models.report import (
     AISummary
 )
 from app.models.update import WorkUpdateResponse
-from app.auth.dependencies import get_current_user
+from app.auth.dependencies import get_current_user, require_employee
 from app.services.ai_summary import generate_ai_summary_with_retry
 from app.services.pdf_export import generate_weekly_report_pdf
 from app.services.email_service import send_manager_notification_email
@@ -72,7 +72,7 @@ async def populate_report_details(report: dict, db) -> dict:
     return report
 
 @router.get("/current", response_model=WeeklyReportResponse)
-async def get_or_init_current_week_report(current_user: dict = Depends(get_current_user)):
+async def get_or_init_current_week_report(current_user: dict = Depends(require_employee)):
     """
     Get current week's report for the logged in employee.
     If none exists, initializes a clean draft pre-populated with active questions.
@@ -132,7 +132,7 @@ async def get_or_init_current_week_report(current_user: dict = Depends(get_curre
     return WeeklyReportResponse(**populated)
 
 @router.get("", response_model=List[WeeklyReportResponse])
-async def get_my_report_history(current_user: dict = Depends(get_current_user)):
+async def get_my_report_history(current_user: dict = Depends(require_employee)):
     """Weekly report history for the logged in employee."""
     db = get_database()
     cursor = db.weekly_reports.find({"user_id": current_user["id"]}).sort("week_start_date", -1)
@@ -180,9 +180,9 @@ async def get_report_by_id(report_id: str, current_user: dict = Depends(get_curr
 @router.post("/draft", response_model=WeeklyReportResponse)
 async def save_report_draft(
     report_data: WeeklyReportCreateOrSave,
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(require_employee)
 ):
-    """Save or update draft weekly report. After submission, the report is strictly read-only."""
+    """Save or update draft weekly report. After submission or during submission, the report is strictly read-only."""
     db = get_database()
     
     # Check if a report for this week already exists
@@ -192,10 +192,10 @@ async def save_report_draft(
         "week_end_date": report_data.week_end_date
     })
 
-    if report and report.get("status") == "submitted":
+    if report and report.get("status") in ["submitting", "submitted"]:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Report has already been submitted and is strictly read-only."
+            detail=f"Report is currently {report.get('status')} and cannot be modified."
         )
 
     answers_list = [a.dict() for a in report_data.answers]
@@ -251,7 +251,7 @@ async def save_report_draft(
 async def submit_weekly_report(
     report_id: str,
     submit_payload: Optional[WeeklyReportSubmit] = None,
-    current_user: dict = Depends(get_current_user)
+    current_user: dict = Depends(require_employee)
 ):
     """
     Submits weekly report:
@@ -287,17 +287,51 @@ async def submit_weekly_report(
                 detail="This report has already been submitted and is read-only."
             )
         if existing.get("status") == "submitting":
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="Report submission is already in progress. Please wait a moment."
-            )
-        raise HTTPException(status_code=400, detail="Report cannot be submitted in its current state")
+            # Check for stale abandoned submission (> 120 seconds) after server crash
+            started_at = existing.get("submission_started_at")
+            if started_at:
+                if isinstance(started_at, str):
+                    try:
+                        started_at = datetime.fromisoformat(started_at)
+                    except Exception:
+                        started_at = datetime.utcnow()
+                age = (datetime.utcnow() - started_at).total_seconds()
+                if age > 120:
+                    logger.warning(f"Submission {report_id} was stale ({age:.1f}s). Resetting to draft and retrying claim.")
+                    await db.weekly_reports.update_one(
+                        {"_id": r_oid, "status": "submitting"},
+                        {"$set": {"status": "draft"}}
+                    )
+                    claimed = await db.weekly_reports.find_one_and_update(
+                        {"_id": r_oid, "user_id": current_user["id"], "status": "draft"},
+                        {"$set": {"status": "submitting", "submission_started_at": datetime.utcnow()}}
+                    )
+
+            if not claimed:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="Report submission is already in progress. Please wait a moment."
+                )
+        else:
+            raise HTTPException(status_code=400, detail="Report cannot be submitted in its current state")
 
     report = claimed
 
     try:
         # Update answers if supplied in payload
         answers = [a.dict() for a in submit_payload.answers] if (submit_payload and submit_payload.answers is not None) else report.get("answers", [])
+
+        # Validate that all 4 required questions have non-empty answers
+        if not answers or len(answers) < 4 or any(not str(a.get("answer", "")).strip() for a in answers):
+            # Roll back status to draft
+            await db.weekly_reports.update_one(
+                {"_id": r_oid, "status": "submitting"},
+                {"$set": {"status": "draft"}}
+            )
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="All 4 weekly reflection questions must be answered before submitting."
+            )
 
         # Fetch daily work updates for the report's week and build immutable snapshot
         cursor = db.work_updates.find({
@@ -346,6 +380,8 @@ async def submit_weekly_report(
         }
 
         await db.weekly_reports.update_one({"_id": r_oid}, {"$set": update_fields})
+    except HTTPException:
+        raise
     except Exception as exc:
         logger.error(f"Error during report submission for {report_id}: {exc}. Reverting to draft.")
         await db.weekly_reports.update_one(

@@ -6,6 +6,7 @@ import logging
 import os
 import smtplib
 import asyncio
+import html
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from typing import Optional
@@ -76,8 +77,13 @@ async def send_manager_notification_email(
     report_id: str,
 ) -> bool:
     """Email the manager when an employee submits their weekly report."""
+    safe_manager_name = html.escape(str(manager_name or "Manager"))
+    safe_employee_name = html.escape(str(employee_name or "Employee"))
+    safe_week_start = html.escape(str(week_start))
+    safe_week_end = html.escape(str(week_end))
+    
     highlights_html = "".join(
-        f"<li style='margin:4px 0;'>{h}</li>" for h in (ai_highlights or ["No highlights available"])
+        f"<li style='margin:4px 0;'>{html.escape(str(h))}</li>" for h in (ai_highlights or ["No highlights available"])
     )
     body = f"""
     <div style="font-family:Inter,Arial,sans-serif;max-width:600px;margin:auto;background:#f8fafc;border-radius:12px;overflow:hidden;border:1px solid #e2e8f0;">
@@ -86,10 +92,10 @@ async def send_manager_notification_email(
         <p style="color:#c7d2fe;margin:6px 0 0;font-size:14px;">Employee Reporting System</p>
       </div>
       <div style="padding:28px 32px;">
-        <p style="color:#374151;font-size:15px;margin:0 0 16px;">Hi <strong>{manager_name}</strong>,</p>
+        <p style="color:#374151;font-size:15px;margin:0 0 16px;">Hi <strong>{safe_manager_name}</strong>,</p>
         <p style="color:#374151;font-size:14px;margin:0 0 20px;">
-          <strong>{employee_name}</strong> has submitted their weekly report for
-          <strong>{week_start} → {week_end}</strong>.
+          <strong>{safe_employee_name}</strong> has submitted their weekly report for
+          <strong>{safe_week_start} → {safe_week_end}</strong>.
         </p>
         <div style="background:#eff6ff;border-left:4px solid #3b82f6;border-radius:6px;padding:16px 20px;margin-bottom:20px;">
           <p style="margin:0 0 8px;font-weight:600;color:#1e40af;font-size:13px;">AI-Generated Key Highlights</p>
@@ -108,7 +114,7 @@ async def send_manager_notification_email(
     """
     return await send_email_async(
         manager_email,
-        f"[Report Submitted] {employee_name} — Week of {week_start}",
+        f"[Report Submitted] {safe_employee_name} — Week of {safe_week_start}",
         body,
     )
 
@@ -119,6 +125,8 @@ async def send_reminder_email(
     week_end: str,
 ) -> bool:
     """Remind an employee to submit their weekly report before the deadline."""
+    safe_employee_name = html.escape(str(employee_name or "Employee"))
+    safe_week_end = html.escape(str(week_end))
     body = f"""
     <div style="font-family:Inter,Arial,sans-serif;max-width:600px;margin:auto;background:#f8fafc;border-radius:12px;overflow:hidden;border:1px solid #e2e8f0;">
       <div style="background:linear-gradient(135deg,#f59e0b,#d97706);padding:28px 32px;">
@@ -126,9 +134,9 @@ async def send_reminder_email(
         <p style="color:#fef3c7;margin:6px 0 0;font-size:14px;">Submission deadline approaching</p>
       </div>
       <div style="padding:28px 32px;">
-        <p style="color:#374151;font-size:15px;margin:0 0 16px;">Hi <strong>{employee_name}</strong>,</p>
+        <p style="color:#374151;font-size:15px;margin:0 0 16px;">Hi <strong>{safe_employee_name}</strong>,</p>
         <p style="color:#374151;font-size:14px;margin:0 0 16px;">
-          A friendly reminder that your weekly report is due by <strong>{week_end}</strong>.
+          A friendly reminder that your weekly report is due by <strong>{safe_week_end}</strong>.
         </p>
         <p style="color:#374151;font-size:14px;margin:0 0 20px;">
           Please log in and submit your report so your manager can review your progress.
@@ -146,6 +154,6 @@ async def send_reminder_email(
     """
     return await send_email_async(
         employee_email,
-        f"[Reminder] Submit your weekly report by {week_end}",
+        f"[Reminder] Submit your weekly report by {safe_week_end}",
         body,
     )

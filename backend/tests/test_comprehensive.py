@@ -7,11 +7,13 @@ from httpx import ASGITransport, AsyncClient
 
 from app.main import app
 from app.config import Settings, settings
-from app.database import get_database, db_manager, DatabaseManager
+from app.database import get_database, db_manager, DatabaseManager, redact_mongo_uri
 from app.services.seed_data import seed_database
+from app.services.email_service import send_manager_notification_email, send_reminder_email
 from unittest.mock import patch, MagicMock
 import json
 import httpx
+from bson import ObjectId
 from app.services.ai_summary import (
     generate_heuristic_summary,
     generate_gemini_summary,
@@ -326,10 +328,18 @@ async def test_concurrent_report_submission_locking():
         r_rep = await client.get("/api/v1/reports/current", headers=h)
         report_id = r_rep.json()["id"]
 
-        # Run 2 submissions concurrently
+        # Run 2 submissions concurrently with complete answers
+        sub_payload = {
+            "answers": [
+                {"question_key": "accomplishments", "question_text": "Q1", "answer": "Done 1"},
+                {"question_key": "in_progress", "question_text": "Q2", "answer": "Done 2"},
+                {"question_key": "blockers", "question_text": "Q3", "answer": "None"},
+                {"question_key": "priorities", "question_text": "Q4", "answer": "Next"}
+            ]
+        }
         res1, res2 = await asyncio.gather(
-            client.post(f"/api/v1/reports/{report_id}/submit", headers=h),
-            client.post(f"/api/v1/reports/{report_id}/submit", headers=h),
+            client.post(f"/api/v1/reports/{report_id}/submit", headers=h, json=sub_payload),
+            client.post(f"/api/v1/reports/{report_id}/submit", headers=h, json=sub_payload),
             return_exceptions=True
         )
 
@@ -522,3 +532,322 @@ async def test_health_check_endpoint():
         assert r.status_code == 200
         data = r.json()
         assert data["status"] == "healthy"
+
+# ============================================================================
+# 7. FINAL DEFECT FIXES VERIFICATION TESTS
+# ============================================================================
+
+def test_mongo_uri_redaction():
+    """Priority 1: Redacts MongoDB credentials from URIs and exception strings."""
+    raw_uri = "mongodb+srv://admin_user:P@ssw0rd123!@cluster0.abcde.mongodb.net/testdb?retryWrites=true"
+    redacted = redact_mongo_uri(raw_uri)
+    assert "P@ssw0rd123!" not in redacted
+    assert "admin_user:***@" in redacted
+
+    err_msg = f"Connection failed to {raw_uri} timed out"
+    redacted_err = redact_mongo_uri(err_msg)
+    assert "P@ssw0rd123!" not in redacted_err
+    assert "admin_user:***@" in redacted_err
+
+@pytest.mark.anyio
+async def test_email_html_escaping():
+    """Priority 1: Escapes all dynamic content inserted into email HTML."""
+    with patch("app.services.email_service.send_email_async", return_value=True) as mock_send:
+        await send_manager_notification_email(
+            manager_email="mgr@company.com",
+            manager_name="<script>alert('xss')</script>Manager",
+            employee_name="<b>Employee</b>",
+            week_start="2026-11-09",
+            week_end="2026-11-15",
+            ai_highlights=["<img src=x onerror=alert(1)> Highlight"],
+            report_id="12345"
+        )
+        assert mock_send.called
+        body = mock_send.call_args[0][2]
+        assert "<script>" not in body
+        assert "&lt;script&gt;alert(&#x27;xss&#x27;)&lt;/script&gt;" in body
+        assert "<b>Employee</b>" not in body
+        assert "&lt;b&gt;Employee&lt;/b&gt;" in body
+        assert "<img src=x onerror=alert(1)>" not in body
+        assert "&lt;img src=x onerror=alert(1)&gt;" in body
+
+@pytest.mark.anyio
+async def test_rbac_manager_forbidden_from_employee_routes():
+    """Priority 1: Enforces employee-only access on employee endpoints."""
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        r_mgr = await client.post("/api/v1/auth/login", json={"email": "manager@company.com", "password": "Manager@123"})
+        mgr_h = {"Authorization": f"Bearer {r_mgr.json()['access_token']}"}
+
+        # 1. GET /updates -> 403
+        r1 = await client.get("/api/v1/updates", headers=mgr_h)
+        assert r1.status_code == 403
+
+        # 2. POST /updates -> 403
+        r2 = await client.post("/api/v1/updates", headers=mgr_h, json={
+            "date": "2026-11-14",
+            "title": "Manager trying to add update",
+            "description": "Long enough description",
+            "hours_spent": 4.0
+        })
+        assert r2.status_code == 403
+
+        # 3. GET /reports/current -> 403
+        r3 = await client.get("/api/v1/reports/current", headers=mgr_h)
+        assert r3.status_code == 403
+
+        # 4. POST /reports/draft -> 403
+        r4 = await client.post("/api/v1/reports/draft", headers=mgr_h, json={
+            "week_start_date": "2026-11-09",
+            "week_end_date": "2026-11-15",
+            "answers": []
+        })
+        assert r4.status_code == 403
+
+@pytest.mark.anyio
+async def test_backend_validation_work_updates_and_answers():
+    """Priority 1: Backend validation for work-update dates, edit fields, hours and report answers."""
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        r_emp = await client.post("/api/v1/auth/login", json={"email": "priya@company.com", "password": "Employee@123"})
+        h = {"Authorization": f"Bearer {r_emp.json()['access_token']}"}
+
+        # 1. Invalid date format
+        r_bad_date = await client.post("/api/v1/updates", headers=h, json={
+            "date": "2026-99-99",
+            "title": "Valid Title",
+            "description": "Valid description long enough",
+            "hours_spent": 5.0
+        })
+        assert r_bad_date.status_code == 422
+
+        # 2. Negative hours
+        r_neg_hours = await client.post("/api/v1/updates", headers=h, json={
+            "date": "2026-11-14",
+            "title": "Valid Title",
+            "description": "Valid description long enough",
+            "hours_spent": -2.0
+        })
+        assert r_neg_hours.status_code == 422
+
+        # 3. Zero hours (must be gt=0)
+        r_zero_hours = await client.post("/api/v1/updates", headers=h, json={
+            "date": "2026-11-14",
+            "title": "Valid Title",
+            "description": "Valid description long enough",
+            "hours_spent": 0
+        })
+        assert r_zero_hours.status_code == 422
+
+        # 4. Hours > 24
+        r_huge_hours = await client.post("/api/v1/updates", headers=h, json={
+            "date": "2026-11-14",
+            "title": "Valid Title",
+            "description": "Valid description long enough",
+            "hours_spent": 25.0
+        })
+        assert r_huge_hours.status_code == 422
+
+@pytest.mark.anyio
+async def test_prevent_work_update_and_draft_modification_while_submitting():
+    """Priority 2: Prevents work-update creation, editing or deletion and draft answers while a report is submitting."""
+    db = get_database()
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        r_emp = await client.post("/api/v1/auth/login", json={"email": "priya@company.com", "password": "Employee@123"})
+        h = {"Authorization": f"Bearer {r_emp.json()['access_token']}"}
+
+        # Initialize Priya's current week report first so it exists in db
+        r_init = await client.get("/api/v1/reports/current", headers=h)
+        assert r_init.status_code == 200
+        cur_report = r_init.json()
+        report_id = cur_report["id"]
+        test_date = cur_report["week_start_date"]
+
+        # Temporarily set report to 'submitting'
+        await db.weekly_reports.update_one(
+            {"_id": ObjectId(report_id)},
+            {"$set": {"status": "submitting", "submission_started_at": datetime.utcnow()}}
+        )
+
+        # Attempt to create work update for submitting week -> 400
+        r_create = await client.post("/api/v1/updates", headers=h, json={
+            "date": test_date,
+            "title": "Blocked Update",
+            "description": "Should be rejected because report is submitting",
+            "hours_spent": 2.0
+        })
+        assert r_create.status_code == 400
+        assert "submitting" in r_create.json()["detail"].lower()
+
+        # Attempt to save draft answers while submitting -> 400
+        r_draft = await client.post("/api/v1/reports/draft", headers=h, json={
+            "week_start_date": cur_report["week_start_date"],
+            "week_end_date": cur_report["week_end_date"],
+            "answers": []
+        })
+        assert r_draft.status_code == 400
+        assert "submitting" in r_draft.json()["detail"].lower()
+
+        # Restore back to draft
+        await db.weekly_reports.update_one(
+            {"_id": ObjectId(report_id)},
+            {"$set": {"status": "draft"}}
+        )
+
+@pytest.mark.anyio
+async def test_submit_requires_all_four_answers():
+    """Priority 2: Enforces all 4 weekly reflection questions must be answered before submitting."""
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        r_emp = await client.post("/api/v1/auth/login", json={"email": "priya@company.com", "password": "Employee@123"})
+        h = {"Authorization": f"Bearer {r_emp.json()['access_token']}"}
+
+        r_rep = await client.get("/api/v1/reports/current", headers=h)
+        rep_id = r_rep.json()["id"]
+
+        # Attempt submission with blank answers -> 400
+        r_sub = await client.post(f"/api/v1/reports/{rep_id}/submit", headers=h, json={
+            "answers": [
+                {"question_key": "q1", "question_text": "Q1", "answer": "Answer 1"},
+                {"question_key": "q2", "question_text": "Q2", "answer": "   "},
+                {"question_key": "q3", "question_text": "Q3", "answer": "Answer 3"},
+                {"question_key": "q4", "question_text": "Q4", "answer": "Answer 4"}
+            ]
+        })
+        assert r_sub.status_code == 400
+        assert "all 4 weekly reflection questions must be answered" in r_sub.json()["detail"].lower()
+
+@pytest.mark.anyio
+async def test_stale_submitting_report_recovery():
+    """Priority 2: Safe recovery for stale submitting reports after a server crash."""
+    db = get_database()
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        r_emp = await client.post("/api/v1/auth/login", json={"email": "priya@company.com", "password": "Employee@123"})
+        h = {"Authorization": f"Bearer {r_emp.json()['access_token']}"}
+
+        r_rep = await client.get("/api/v1/reports/current", headers=h)
+        rep_id = r_rep.json()["id"]
+
+        # Artificially set status to 'submitting' with timestamp 200 seconds ago (stale)
+        stale_time = datetime.utcnow() - timedelta(seconds=200)
+        await db.weekly_reports.update_one(
+            {"_id": ObjectId(rep_id)},
+            {"$set": {"status": "submitting", "submission_started_at": stale_time}}
+        )
+
+        # Now submit with complete answers - it should detect stale submission, recover, and submit
+        r_sub = await client.post(f"/api/v1/reports/{rep_id}/submit", headers=h, json={
+            "answers": [
+                {"question_key": "accomplishments", "question_text": "Q1", "answer": "Done 1"},
+                {"question_key": "in_progress", "question_text": "Q2", "answer": "Done 2"},
+                {"question_key": "blockers", "question_text": "Q3", "answer": "None"},
+                {"question_key": "priorities", "question_text": "Q4", "answer": "Next"}
+            ]
+        })
+        assert r_sub.status_code == 200
+        assert r_sub.json()["status"] == "submitted"
+        assert len(r_sub.json().get("work_updates", [])) >= 0
+
+@pytest.mark.anyio
+async def test_reminders_force_true_idempotent_and_smtp_failure():
+    """Priority 3: Manual reminders idempotent (force=True does not duplicate) and unconfirmed SMTP marked failed."""
+    db = get_database()
+    await db.reminder_logs.delete_many({})
+
+    # 1. Run reminder check with force=True -> sends reminders
+    res1 = await run_reminder_check(force=True)
+    assert res1["status"] == "success"
+    sent1 = res1["sent_count"]
+    assert sent1 > 0
+
+    # 2. Run reminder check again immediately with force=True -> duplicate count must be 0!
+    res2 = await run_reminder_check(force=True)
+    assert res2["status"] == "success"
+    assert res2["sent_count"] == 0, "Repeated manager reminder must be idempotent even with force=True"
+
+    # 3. Test SMTP failure does not record reminder as sent
+    await db.reminder_logs.delete_many({})
+    with patch("app.services.reminder.send_reminder_email", return_value=False):
+        with patch.dict(os.environ, {"TESTING": "0"}):
+            res_fail = await run_reminder_check(force=True)
+            assert res_fail["sent_count"] == 0
+            failed_logs = await db.reminder_logs.find({"status": "failed"}).to_list(10)
+            assert len(failed_logs) > 0
+            sent_logs = await db.reminder_logs.find({"status": "sent"}).to_list(10)
+            assert len(sent_logs) == 0
+
+@pytest.mark.anyio
+async def test_mocked_gemini_groq_local_fallback_sequence():
+    """Priority 4: Tests the actual mocked Gemini -> Groq -> local fallback sequence."""
+    sample_data = {
+        "user_name": "Fallback Sequence Test",
+        "week_start_date": "2026-11-09",
+        "week_end_date": "2026-11-15",
+        "work_updates": [{"title": "Task 1", "category": "Feature", "hours_spent": 5.0}],
+        "answers": [{"question_key": "accomplishments", "answer": "Built feature"}]
+    }
+
+    # Step 1: Gemini succeeds
+    with patch("app.services.ai_summary.generate_gemini_summary", return_value={
+        "executive_summary": "Gemini Summary",
+        "key_highlights": ["Gemini Highlight"],
+        "blockers_identified": [],
+        "manager_recommendation": "Gemini Rec",
+        "model_used": "Google Gemini (gemini-3.5-flash-lite)"
+    }):
+        with patch.object(settings, "GEMINI_API_KEY", "fake_gemini_key"):
+            with patch.dict(os.environ, {"ALLOW_LIVE_AI_IN_TESTS": "1"}):
+                res_gem = await generate_ai_summary_with_retry(sample_data)
+                assert "Gemini" in res_gem["model_used"]
+
+    # Step 2: Gemini fails, Groq succeeds
+    with patch("app.services.ai_summary.generate_gemini_summary", side_effect=Exception("Gemini Down")):
+        with patch("app.services.ai_summary.generate_groq_summary", return_value={
+            "executive_summary": "Groq Summary",
+            "key_highlights": ["Groq Highlight"],
+            "blockers_identified": [],
+            "manager_recommendation": "Groq Rec",
+            "model_used": "Groq Llama-3 (Free Tier Fallback)"
+        }):
+            with patch.object(settings, "GEMINI_API_KEY", "fake_gemini_key"):
+                with patch.object(settings, "GROQ_API_KEY", "fake_groq_key"):
+                    with patch.dict(os.environ, {"ALLOW_LIVE_AI_IN_TESTS": "1"}):
+                        res_groq = await generate_ai_summary_with_retry(sample_data, max_retries=1)
+                        assert "Groq" in res_groq["model_used"]
+
+    # Step 3: Both Gemini and Groq fail -> Local fallback succeeds
+    with patch("app.services.ai_summary.generate_gemini_summary", side_effect=Exception("Gemini Down")):
+        with patch("app.services.ai_summary.generate_groq_summary", side_effect=Exception("Groq Down")):
+            with patch.object(settings, "GEMINI_API_KEY", "fake_gemini_key"):
+                with patch.object(settings, "GROQ_API_KEY", "fake_groq_key"):
+                    with patch.dict(os.environ, {"ALLOW_LIVE_AI_IN_TESTS": "1"}):
+                        res_local = await generate_ai_summary_with_retry(sample_data, max_retries=1)
+                        assert "Built-in" in res_local["model_used"]
+
+@pytest.mark.anyio
+async def test_heuristic_summary_no_fabricated_accomplishments():
+    """Priority 4: No fabricated accomplishments in heuristic summary when no updates are provided."""
+    empty_data = {
+        "user_name": "Clean Test",
+        "week_start_date": "2026-11-09",
+        "week_end_date": "2026-11-15",
+        "work_updates": [],
+        "answers": []
+    }
+    res = generate_heuristic_summary(empty_data)
+    assert "deliverables and tasks" not in res["key_highlights"][0]
+    assert "No specific accomplishments or work updates logged" in res["key_highlights"][0]
+
+@pytest.mark.anyio
+async def test_seed_data_gemini_metadata():
+    """Priority 4: Correct model metadata in demo seed data."""
+    db = get_database()
+    alex = await db.users.find_one({"email": "alex@company.com"})
+    alex_report = await db.weekly_reports.find_one({"user_id": str(alex["_id"]), "status": "submitted"})
+    assert alex_report is not None
+    assert alex_report.get("ai_summary") is not None
+    model = alex_report["ai_summary"].get("model_used", "")
+    assert "1.5" not in model, f"Found obsolete model in seeded report: {model}"
+    assert "gemini-3.5-flash-lite" in model

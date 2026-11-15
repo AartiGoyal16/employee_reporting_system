@@ -26,6 +26,18 @@ async def lifespan(app: FastAPI):
         await seed_database(db)
     except Exception as e:
         logger.error(f"Error during auto-seeding: {e}")
+
+    # Recover any stale reports stuck in 'submitting' from previous server crash
+    try:
+        from datetime import datetime
+        res = await db.weekly_reports.update_many(
+            {"status": "submitting"},
+            {"$set": {"status": "draft", "updated_at": datetime.utcnow()}}
+        )
+        if getattr(res, "modified_count", 0):
+            logger.info(f"Recovered {res.modified_count} stale 'submitting' reports back to 'draft'.")
+    except Exception as e:
+        logger.warning(f"Could not perform startup stale report recovery: {e}")
     # Launch background deadline reminder scheduler if enabled
     reminder_task = None
     if settings.ENABLE_REMINDER_SCHEDULER:

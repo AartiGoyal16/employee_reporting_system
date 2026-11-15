@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import { Navbar } from '../components/Navbar';
 import { AISummaryCard } from '../components/AISummaryCard';
 import { reportService, questionService } from '../services/api';
+import { validateWeeklyReportAnswers } from '../utils/validators';
 import { 
   FileText, 
   Save, 
@@ -108,12 +109,12 @@ export const WeeklyReportPage = () => {
   const handleSubmitReport = async () => {
     if (report?.status === 'submitted') return;
 
-    // Check if at least one question is answered
-    const hasAnswers = Object.values(answers).some((val) => val && val.trim().length > 0);
-    if (!hasAnswers) {
+    const payloadAnswers = prepareAnswerPayload();
+    const answerValidation = validateWeeklyReportAnswers(payloadAnswers, 4);
+    if (!answerValidation.isValid) {
       setFeedback({
         type: 'error',
-        message: 'Please provide answers to the reflection questions before submitting.'
+        message: answerValidation.errors.answers || answerValidation.errors.general || 'Please answer all 4 reflection questions before submitting.'
       });
       return;
     }
@@ -127,7 +128,7 @@ export const WeeklyReportPage = () => {
     setFeedback({ type: '', message: '' });
     try {
       const payload = {
-        answers: prepareAnswerPayload(),
+        answers: payloadAnswers,
       };
       const res = await reportService.submitReport(report.id, payload);
       setReport(res.data);

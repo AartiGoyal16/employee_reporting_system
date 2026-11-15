@@ -1,10 +1,22 @@
 import logging
 import asyncio
+import re
 from motor.motor_asyncio import AsyncIOMotorClient
 import mongomock
 from app.config import settings
 
 logger = logging.getLogger(__name__)
+
+def redact_mongo_uri(uri_or_text: str) -> str:
+    """
+    Redacts password and credentials from MongoDB URI strings or exception messages.
+    e.g. mongodb+srv://user:secret123@cluster.mongodb.net -> mongodb+srv://user:***@cluster.mongodb.net
+    """
+    if not uri_or_text:
+        return ""
+    # Redact standard URI pattern user:password@
+    redacted = re.sub(r'(mongodb(?:\+srv)?://[^:]+:)([^@]+)(@)', r'\1***\3', str(uri_or_text))
+    return redacted
 
 class MockCursorWrapper:
     def __init__(self, cursor):
@@ -123,8 +135,9 @@ class DatabaseManager:
             await self._create_indexes_safe()
             return
 
+        safe_uri = redact_mongo_uri(settings.MONGODB_URI)
         try:
-            logger.info(f"Connecting to MongoDB at {settings.MONGODB_URI} (environment={settings.ENVIRONMENT})...")
+            logger.info(f"Connecting to MongoDB at {safe_uri} (environment={settings.ENVIRONMENT})...")
             timeout = 5000 if is_production else 1500
             client = AsyncIOMotorClient(
                 settings.MONGODB_URI,
@@ -139,15 +152,16 @@ class DatabaseManager:
             logger.info(f"Connected to live MongoDB database '{settings.DATABASE_NAME}'")
             await self._create_indexes_safe()
         except Exception as e:
+            safe_err = redact_mongo_uri(str(e))
             if is_production:
-                logger.critical(f"FATAL: Production database connection failed to '{settings.MONGODB_URI}': {e}")
+                logger.critical(f"FATAL: Production database connection failed to '{safe_uri}': {safe_err}")
                 raise RuntimeError(
-                    f"Production startup failed: Unable to connect to MongoDB at '{settings.MONGODB_URI}'. "
-                    f"In production, falling back to mock database is prohibited. Error: {e}"
+                    f"Production startup failed: Unable to connect to MongoDB at '{safe_uri}'. "
+                    f"In production, falling back to mock database is prohibited. Error: {safe_err}"
                 )
 
             logger.warning(
-                f"Could not connect to live MongoDB: {e}. "
+                f"Could not connect to live MongoDB: {safe_err}. "
                 f"Falling back to mongomock async wrapper for local dev/testing."
             )
             self.is_mock = True

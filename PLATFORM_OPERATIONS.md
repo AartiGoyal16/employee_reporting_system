@@ -114,7 +114,7 @@ MongoDB is used as the document store. Documents are structured to support fast,
       "No critical blockers reported this week."
     ],
     "manager_recommendation": "Maintain current momentum and review upcoming priorities.",
-    "model_used": "Google Gemini 2.5 Flash",
+    "model_used": "Google Gemini (gemini-3.5-flash-lite)",
     "generated_at": "ISODate"
   },
   "created_at": "ISODate",
@@ -216,7 +216,7 @@ MongoDB is used as the document store. Documents are structured to support fast,
    - `ALGORITHM`: `HS256`
    - `ACCESS_TOKEN_EXPIRE_MINUTES`: `10080`
    - `GEMINI_API_KEY`: *Your Google AI Studio API key*
-   - `GEMINI_MODEL`: `gemini-2.5-flash`
+   - `GEMINI_MODEL`: `gemini-3.5-flash-lite`
    - `BACKEND_CORS_ORIGINS`: `["https://your-frontend-app.vercel.app"]` *(IMPORTANT: Must be your exact Vercel frontend URL. Wildcards are strictly blocked in production)*
    - `ENABLE_DEMO_USERS`: `false` *(Disables public demo credentials endpoint)*
    - `ENABLE_REMINDER_SCHEDULER`: `true`

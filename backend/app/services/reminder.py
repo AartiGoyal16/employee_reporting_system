@@ -81,11 +81,38 @@ async def run_reminder_check(manager_id: Optional[str] = None, force: bool = Fal
             "type": "deadline_reminder"
         }
 
-        if not force:
-            existing = await db.reminder_logs.find_one(claim_key)
-            if existing and existing.get("status") in ["claimed", "sent"]:
+        # Check existing claim status regardless of force=True or force=False
+        existing = await db.reminder_logs.find_one(claim_key)
+        if existing:
+            claim_status = existing.get("status")
+            if claim_status == "sent":
+                # Already successfully sent to this employee for this week
                 continue
-
+            elif claim_status == "claimed":
+                # Check for abandoned/stale claim (> 300 seconds)
+                claimed_at = existing.get("claimed_at")
+                if isinstance(claimed_at, str):
+                    try:
+                        claimed_at = datetime.fromisoformat(claimed_at)
+                    except Exception:
+                        claimed_at = datetime.utcnow()
+                age = (datetime.utcnow() - (claimed_at or datetime.utcnow())).total_seconds()
+                if age < 300:
+                    # In progress by another worker
+                    continue
+                logger.warning(f"[Reminder] Recovering abandoned claim for {emp_email} (age {age:.1f}s)")
+                await db.reminder_logs.update_one(
+                    claim_key,
+                    {"$set": {"status": "claimed", "claimed_at": datetime.utcnow()}}
+                )
+            elif claim_status == "failed":
+                # Previous attempt failed; allow re-attempt by re-claiming
+                logger.info(f"[Reminder] Retrying previously failed reminder for {emp_email}")
+                await db.reminder_logs.update_one(
+                    claim_key,
+                    {"$set": {"status": "claimed", "claimed_at": datetime.utcnow()}}
+                )
+        else:
             # Atomically attempt to insert the claim to prevent other instances from double-sending
             try:
                 await db.reminder_logs.insert_one({
@@ -100,11 +127,15 @@ async def run_reminder_check(manager_id: Optional[str] = None, force: bool = Fal
 
         # 3. Dispatch reminder email
         try:
-            if is_test:
-                logger.info(f"[TESTING] Suppressed actual email send to {emp_email}")
-                sent = True
-            else:
-                sent = await send_reminder_email(emp_email, emp_name, week_end)
+            sent = await send_reminder_email(emp_email, emp_name, week_end)
+
+            if not sent:
+                logger.warning(f"[Reminder] Delivery unconfirmed / SMTP error for {emp_email}. Marking claim as failed.")
+                await db.reminder_logs.update_one(
+                    claim_key,
+                    {"$set": {"status": "failed", "failed_at": datetime.utcnow()}}
+                )
+                continue
 
             now = datetime.utcnow()
             # Update reminder log to sent
@@ -123,12 +154,15 @@ async def run_reminder_check(manager_id: Optional[str] = None, force: bool = Fal
 
             sent_count += 1
             reminded_employees.append({"name": emp_name, "email": emp_email})
-            logger.info(f"[Reminder] Sent reminder to {emp_name} ({emp_email})")
+            logger.info(f"[Reminder] Successfully sent and recorded reminder for {emp_name} ({emp_email})")
         except Exception as exc:
             logger.warning(f"[Reminder] Failed to send reminder to {emp_email}: {exc}")
-            # Release failed claim so subsequent run can retry
+            # Mark claim as failed so subsequent run can retry
             try:
-                await db.reminder_logs.delete_one(claim_key)
+                await db.reminder_logs.update_one(
+                    claim_key,
+                    {"$set": {"status": "failed", "failed_at": datetime.utcnow()}}
+                )
             except Exception:
                 pass
 

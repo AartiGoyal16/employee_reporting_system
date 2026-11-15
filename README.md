@@ -15,10 +15,16 @@ An enterprise-grade, backend-focused full-stack MVP built for the Technical Asse
   - Four Weekly Reflection Questions with draft saving and auto-recovery.
   - One-click report submission locking the report into immutable **Read-Only** mode.
 - **Free-Tier AI Integration with Multi-Tier Fallback & Retry**:
-  - Primary: **Google Gemini 2.5 Flash** (Free Tier via Google AI Studio).
+  - Primary: **Google Gemini 3.5 Flash-Lite** (`gemini-3.5-flash-lite`, Free Tier via Google AI Studio).
   - Secondary: **Groq Llama-3.1-8b** (Free Tier).
   - Resilient Fallback: Built-in deterministic NLP heuristic engine ensuring 100% submission reliability even if external APIs or network connectivity are offline.
   - Zero Hallucination Guardrails: Prompts strictly constrain output to actual logged work updates and weekly answers without inventing unperformed tasks.
+- **Enterprise-Grade Security & Data Integrity**:
+  - 🔒 **Credential Redaction**: MongoDB URIs and passwords are automatically stripped from all logs and runtime exceptions.
+  - 🛡️ **Email XSS Sanitization**: Dynamic user inputs and AI highlights are fully escaped before insertion into email templates.
+  - 🔐 **Employee Route Isolation**: Work update CRUD and weekly report draft/submission routes strictly require Employee role.
+  - ⚡ **Atomic Concurrency & Crash Recovery**: `submitting` transition locks drafts against double submission; orphaned submissions auto-recover on restart.
+  - ⏰ **Idempotent Reminders**: Unique compound index claims prevent duplicate reminder emails across multi-instance workers and on-demand triggers.
 - **Bonus Capabilities Included**:
   - 📄 **PDF Generation & Export**: Download official executive report PDFs with branded headers, meta table, AI summary card, question reflections, and daily logs.
   - 🔁 **AI Retry Logic**: Exponential backoff with 2 retries for transient API network hiccups.
@@ -185,12 +191,12 @@ Open your browser at `http://localhost:5173`.
 
 ## 🤖 AI Model Selection & Resilience Note
 
-- **Primary Model**: **Google Gemini 2.5 Flash** (`gemini-2.5-flash`, configurable via `GEMINI_MODEL`).
-  - *Why selected*: Google Gemini 2.5 Flash is actively supported on the free tier according to Google's official Gemini API documentation, providing high speed, structured JSON generation, and a generous context window. The predecessor `gemini-1.5-flash` is deprecated.
+- **Primary Model**: **Google Gemini 3.5 Flash-Lite** (`gemini-3.5-flash-lite`, configurable via `GEMINI_MODEL`).
+  - *Why selected*: Google Gemini 3.5 Flash-Lite is officially supported on the free tier according to Google's official Gemini API documentation, providing high speed, structured JSON generation, and a generous context window. Predecessor models (`gemini-1.5-flash` and `gemini-2.5-flash`) have been deprecated or phased out for new projects.
   - *Fallback*: Secondary fallback to Groq Llama-3.1 (`llama-3.1-8b-instant`) free tier.
-- **Fail-Safe Heuristic Engine**: If no API key is supplied or external provider rate limits/timeouts occur, the built-in deterministic NLP heuristic engine parses work categories, logged hours, completed milestones, and blockers to synthesize the executive summary and manager recommendation. Output is strictly marked with `model_used: "Deterministic Heuristic Fallback (Local)"`.
+- **Fail-Safe Heuristic Engine**: If no API key is supplied or external provider rate limits/timeouts occur, the built-in deterministic NLP heuristic engine parses work categories, logged hours, completed milestones, and blockers to synthesize the executive summary and manager recommendation. Output is strictly marked with `model_used: "Deterministic Heuristic Fallback (Local)"`. Never hallucinates or invents deliverables if updates are absent.
 - **Retry Mechanism**: The system automatically executes exponential retries on transient connection timeouts.
-- **Security & Guardrails**: The API key is sent via standard HTTP header `x-goog-api-key` (never exposed in query parameters or logged); the prompt explicitly instructs the LLM not to invent tasks or embellish outside the provided updates.
+- **Security & Guardrails**: The API key is sent via standard HTTP header `x-goog-api-key` (never exposed in query parameters or logged); the prompt explicitly instructs the LLM not to invent tasks or embellish outside the provided updates. Error logs automatically redact sensitive credentials.
 
 ---
 

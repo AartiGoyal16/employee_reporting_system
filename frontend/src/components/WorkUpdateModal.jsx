@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { X, Clock, Calendar, Tag, AlertCircle, Save } from 'lucide-react';
+import { validateWorkUpdate } from '../utils/validators';
 
 const CATEGORIES = [
   'Feature',
@@ -49,12 +50,10 @@ export const WorkUpdateModal = ({ isOpen, onClose, onSave, initialData }) => {
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-    if (!formData.title.trim()) {
-      setError('Please provide a title for the task.');
-      return;
-    }
-    if (!formData.description.trim()) {
-      setError('Please provide a detailed task description.');
+    const validation = validateWorkUpdate(formData);
+    if (!validation.isValid) {
+      const firstError = Object.values(validation.errors)[0];
+      setError(firstError);
       return;
     }
 

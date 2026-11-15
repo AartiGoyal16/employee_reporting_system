@@ -1,11 +1,21 @@
-from pydantic import BaseModel, Field
+import re
+from pydantic import BaseModel, Field, field_validator, model_validator
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 from app.models.update import WorkUpdateResponse
 
+def validate_iso_date(v: str) -> str:
+    if not re.match(r"^\d{4}-\d{2}-\d{2}$", v):
+        raise ValueError("Date must be in YYYY-MM-DD format")
+    try:
+        datetime.strptime(v, "%Y-%m-%d")
+    except ValueError:
+        raise ValueError("Invalid calendar date")
+    return v
+
 class QuestionAnswer(BaseModel):
-    question_key: str = Field(..., description="Key of question e.g. accomplishments")
-    question_text: str = Field(..., description="The prompt question text")
+    question_key: str = Field(..., min_length=1, description="Key of question e.g. accomplishments")
+    question_text: str = Field(..., min_length=1, description="The prompt question text")
     answer: str = Field("", description="Employee's answer to the question")
 
 class AISummary(BaseModel):
@@ -21,6 +31,17 @@ class WeeklyReportCreateOrSave(BaseModel):
     week_end_date: str = Field(..., description="End date of week YYYY-MM-DD")
     answers: List[QuestionAnswer] = Field(default_factory=list)
     work_update_ids: Optional[List[str]] = Field(default_factory=list)
+
+    @field_validator("week_start_date", "week_end_date")
+    @classmethod
+    def validate_dates(cls, v: str) -> str:
+        return validate_iso_date(v)
+
+    @model_validator(mode="after")
+    def validate_range(self):
+        if self.week_start_date > self.week_end_date:
+            raise ValueError("week_start_date cannot be after week_end_date")
+        return self
 
 class WeeklyReportSubmit(BaseModel):
     # Optional last updates before submission

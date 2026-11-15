@@ -154,7 +154,7 @@ def generate_heuristic_summary(report_data: Dict[str, Any]) -> Dict[str, Any]:
             highlights.append(f"{title} ({u.get('category', 'Task')})")
 
     if not highlights:
-        highlights = ["Logged weekly sprint deliverables and tasks."]
+        highlights = ["No specific accomplishments or work updates logged for this period."]
 
     # Blockers strictly grounded in provided data
     blocker_list = []
@@ -164,13 +164,19 @@ def generate_heuristic_summary(report_data: Dict[str, Any]) -> Dict[str, Any]:
     else:
         blocker_list = ["No critical blockers reported this week."]
 
-    cat_str = f" across {', '.join(categories)}" if categories else ""
-    hours_str = f" across {total_hours} logged hours" if total_hours > 0 else ""
-    exec_summary = (
-        f"{user_name} demonstrated steady weekly progress{hours_str}{cat_str}. "
-        f"Key focus: {highlights[0].lower() if highlights else 'ongoing tasks'}. "
-        f"Next priorities: {priorities.split('.')[0] if priorities else 'sprint execution'}."
-    )
+    if total_hours > 0 or updates:
+        cat_str = f" across {', '.join(categories)}" if categories else ""
+        hours_str = f" across {total_hours} logged hours" if total_hours > 0 else ""
+        exec_summary = (
+            f"{user_name} demonstrated steady weekly progress{hours_str}{cat_str}. "
+            f"Key focus: {highlights[0].lower() if highlights else 'ongoing tasks'}. "
+            f"Next priorities: {priorities.split('.')[0] if priorities else 'sprint execution'}."
+        )
+    else:
+        exec_summary = (
+            f"{user_name} submitted a weekly report with no logged work updates. "
+            f"Next priorities: {priorities.split('.')[0] if priorities else 'sprint alignment'}."
+        )
 
     if "No critical blockers" not in blocker_list[0]:
         rec = f"Review reported blocker ('{blocker_list[0]}') in upcoming 1-on-1 to support progress."

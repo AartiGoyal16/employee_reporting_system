@@ -214,7 +214,7 @@ async def seed_database(db):
         "answers": alex_answers
     }
     alex_ai_summary = generate_heuristic_summary(report_data_for_ai)
-    alex_ai_summary["model_used"] = "Google Gemini 1.5 Flash"
+    alex_ai_summary["model_used"] = "Google Gemini (gemini-3.5-flash-lite)"
 
     alex_report = {
         "_id": ObjectId(),
@@ -303,7 +303,7 @@ async def seed_database(db):
         "work_updates": priya_updates,
         "answers": priya_answers
     })
-    priya_ai["model_used"] = "Google Gemini 1.5 Flash"
+    priya_ai["model_used"] = "Google Gemini (gemini-3.5-flash-lite)"
 
     priya_report = {
         "_id": ObjectId(),

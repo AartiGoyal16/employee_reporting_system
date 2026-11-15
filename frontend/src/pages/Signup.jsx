@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { authService } from '../services/api';
+import { validateSignupForm } from '../utils/validators';
 import {
   ClipboardList,
   UserPlus,
@@ -85,28 +86,9 @@ export const Signup = () => {
   };
 
   const validate = () => {
-    const newErrors = {};
-    if (!formData.name.trim() || formData.name.trim().length < 2) {
-      newErrors.name = 'Full name must be at least 2 characters.';
-    }
-    if (!formData.email.trim()) {
-      newErrors.email = 'Email address is required.';
-    } else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(formData.email)) {
-      newErrors.email = 'Please enter a valid email address.';
-    }
-    if (!formData.password) {
-      newErrors.password = 'Password is required.';
-    } else if (formData.password.length < 6) {
-      newErrors.password = 'Password must be at least 6 characters.';
-    }
-    if (formData.password !== formData.confirmPassword) {
-      newErrors.confirmPassword = 'Passwords do not match.';
-    }
-    if (!formData.department) {
-      newErrors.department = 'Please select a department.';
-    }
+    const { isValid, errors: newErrors } = validateSignupForm(formData);
     setErrors(newErrors);
-    return Object.keys(newErrors).length === 0;
+    return isValid;
   };
 
   const handleSubmit = async (e) => {
