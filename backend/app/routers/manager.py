@@ -102,16 +102,6 @@ async def get_team_report_detail(
     populated = await populate_report_details(report, db)
     return WeeklyReportResponse(**populated)
 
-@router.post("/send-reminders")
-async def trigger_team_reminders(current_user: dict = Depends(require_manager)):
-    """
-    Manager can manually trigger deadline reminder emails
-    to all their assigned employees who haven't submitted yet this week.
-    """
-    from app.services.reminder import run_reminder_check
-    result = await run_reminder_check(manager_id=current_user["id"], force=True)
-    return result
-
 @router.get("/unassigned-employees", response_model=List[UserResponse])
 async def get_unassigned_employees(current_user: dict = Depends(require_manager)):
     """Retrieve employees who do not currently have an assigned manager."""

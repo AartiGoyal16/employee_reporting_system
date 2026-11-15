@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import { Navbar } from '../components/Navbar';
-import { questionService, managerService } from '../services/api';
+import { questionService } from '../services/api';
 import {
   Settings,
   Plus,
@@ -10,7 +10,6 @@ import {
   Check,
   X,
   AlertCircle,
-  Bell,
   ArrowLeft,
   CheckCircle2,
   HelpCircle,
@@ -23,15 +22,11 @@ export const QuestionManagerPage = () => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [successMsg, setSuccessMsg] = useState('');
-  const [warningMsg, setWarningMsg] = useState('');
-  const [infoMsg, setInfoMsg] = useState('');
   const [newKey, setNewKey] = useState('');
   const [newText, setNewText] = useState('');
   const [adding, setAdding] = useState(false);
   const [editingId, setEditingId] = useState(null);
   const [editText, setEditText] = useState('');
-  const [sendingReminders, setSendingReminders] = useState(false);
-  const [reminderResult, setReminderResult] = useState(null);
 
   useEffect(() => {
     loadQuestions();
@@ -118,35 +113,6 @@ export const QuestionManagerPage = () => {
     }
   };
 
-  const handleSendReminders = async () => {
-    setSendingReminders(true);
-    setReminderResult(null);
-    setError('');
-    setSuccessMsg('');
-    setWarningMsg('');
-    setInfoMsg('');
-    try {
-      const res = await managerService.sendReminders();
-      const data = res.data;
-      setReminderResult(data);
-      if (data.status === 'success') {
-        setSuccessMsg(data.message || `Deadline reminders sent to ${data.sent_count} team members!`);
-      } else if (data.status === 'partial_success') {
-        setWarningMsg(data.message || `Reminders partially sent (${data.sent_count} sent, ${data.failed_count} failed).`);
-      } else if (data.status === 'failed' || data.status === 'smtp_not_configured') {
-        setError(data.message || 'Failed to dispatch deadline reminders.');
-      } else {
-        // Zero emails sent: all_submitted, already_reminded, no_eligible, skipped
-        setInfoMsg(data.message || 'No eligible employees require reminders at this time.');
-      }
-    } catch (err) {
-      console.error(err);
-      setError(err.response?.data?.detail || 'Failed to trigger deadline reminders.');
-    } finally {
-      setSendingReminders(false);
-    }
-  };
-
   return (
     <div className="min-h-screen bg-slate-50 flex flex-col">
       <Navbar />
@@ -165,26 +131,11 @@ export const QuestionManagerPage = () => {
             </div>
             <h1 className="text-2xl sm:text-3xl font-extrabold text-slate-900 tracking-tight flex items-center gap-2.5">
               <Settings className="w-7 h-7 text-indigo-600" />
-              Configure Weekly Questions &amp; Reminders
+              Configure Weekly Questions
             </h1>
             <p className="text-sm text-slate-500 mt-1">
-              Customize the weekly reflection questions answered by employees and trigger automated deadline reminders.
+              Customize the weekly reflection questions answered by employees for weekly report submissions.
             </p>
-          </div>
-
-          <div className="flex items-center gap-3">
-            <button
-              onClick={handleSendReminders}
-              disabled={sendingReminders}
-              className="px-4 py-2.5 rounded-xl text-xs sm:text-sm font-semibold bg-amber-500 hover:bg-amber-600 text-white shadow-md shadow-amber-500/20 flex items-center gap-2 transition-all disabled:opacity-50"
-            >
-              {sendingReminders ? (
-                <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
-              ) : (
-                <Bell className="w-4 h-4" />
-              )}
-              Send Deadline Reminders Now
-            </button>
           </div>
         </div>
 
@@ -196,71 +147,10 @@ export const QuestionManagerPage = () => {
           </div>
         )}
 
-        {warningMsg && (
-          <div className="p-4 bg-amber-50 border border-amber-200 rounded-2xl text-sm text-amber-800 flex items-center gap-3 mb-6">
-            <AlertCircle className="w-5 h-5 shrink-0 text-amber-600" />
-            <span>{warningMsg}</span>
-          </div>
-        )}
-
-        {infoMsg && (
-          <div className="p-4 bg-blue-50 border border-blue-200 rounded-2xl text-sm text-blue-800 flex items-center gap-3 mb-6">
-            <Bell className="w-5 h-5 shrink-0 text-blue-600" />
-            <span>{infoMsg}</span>
-          </div>
-        )}
-
         {successMsg && (
           <div className="p-4 bg-emerald-50 border border-emerald-200 rounded-2xl text-sm text-emerald-800 flex items-center gap-3 mb-6">
             <CheckCircle2 className="w-5 h-5 shrink-0 text-emerald-600" />
             <span>{successMsg}</span>
-          </div>
-        )}
-
-        {reminderResult && (
-          <div className="p-4 bg-slate-50 border border-slate-200 rounded-2xl text-xs text-slate-800 mb-6 space-y-2">
-            <div className="flex items-center justify-between border-b border-slate-200 pb-2">
-              <span className="font-bold text-sm text-slate-900">Reminder Run Summary</span>
-              <span className="text-[11px] text-slate-500">{reminderResult.week_start} &rarr; {reminderResult.week_end}</span>
-            </div>
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-1">
-              <div className="bg-white p-2 rounded-xl border border-slate-200/60 text-center">
-                <div className="text-[10px] uppercase font-bold text-slate-400">Eligible</div>
-                <div className="text-base font-bold text-slate-800">{reminderResult.eligible_count ?? 0}</div>
-              </div>
-              <div className="bg-white p-2 rounded-xl border border-slate-200/60 text-center">
-                <div className="text-[10px] uppercase font-bold text-slate-400">Sent</div>
-                <div className="text-base font-bold text-emerald-600">{reminderResult.sent_count ?? 0}</div>
-              </div>
-              <div className="bg-white p-2 rounded-xl border border-slate-200/60 text-center">
-                <div className="text-[10px] uppercase font-bold text-slate-400">Skipped</div>
-                <div className="text-base font-bold text-slate-500">{reminderResult.skipped_count ?? 0}</div>
-              </div>
-              <div className="bg-white p-2 rounded-xl border border-slate-200/60 text-center">
-                <div className="text-[10px] uppercase font-bold text-slate-400">Failed</div>
-                <div className="text-base font-bold text-red-500">{reminderResult.failed_count ?? 0}</div>
-              </div>
-            </div>
-            {reminderResult.reminded_employees?.length > 0 && (
-              <div className="pt-2">
-                <p className="font-semibold text-slate-700">Successfully Reminded:</p>
-                <ul className="mt-1 list-disc list-inside text-emerald-800">
-                  {reminderResult.reminded_employees.map((e, idx) => (
-                    <li key={idx}>{e.name} ({e.email})</li>
-                  ))}
-                </ul>
-              </div>
-            )}
-            {reminderResult.failed_employees?.length > 0 && (
-              <div className="pt-1">
-                <p className="font-semibold text-red-700">Delivery Failed:</p>
-                <ul className="mt-1 list-disc list-inside text-red-700">
-                  {reminderResult.failed_employees.map((e, idx) => (
-                    <li key={idx}>{e.name} ({e.email})</li>
-                  ))}
-                </ul>
-              </div>
-            )}
           </div>
         )}
 

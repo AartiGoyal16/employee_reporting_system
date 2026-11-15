@@ -90,7 +90,6 @@ export const managerService = {
   getEmployees: () => api.get('/manager/employees'),
   getReports: (params) => api.get('/manager/reports', { params }),
   getReportDetail: (id) => api.get(`/manager/reports/${id}`),
-  sendReminders: () => api.post('/manager/send-reminders'),
 };
 
 export default api;

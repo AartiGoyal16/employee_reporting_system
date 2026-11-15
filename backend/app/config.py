@@ -10,7 +10,6 @@ class Settings(BaseSettings):
     ENVIRONMENT: str = "development"  # "development", "staging", "production", "test"
     ENABLE_DEMO_USERS: bool = True
     SEED_DEMO_ACCOUNTS: bool = True
-    ENABLE_REMINDER_SCHEDULER: bool = True
     
     # Security
     JWT_SECRET_KEY: str = "supersecret_jwt_key_bharatrohan_development_change_in_production_123456"
@@ -28,16 +27,6 @@ class Settings(BaseSettings):
     GROQ_API_KEY: Optional[str] = None
     GROQ_MODEL: str = "openai/gpt-oss-120b"
     OPENAI_API_KEY: Optional[str] = None
-
-    # Email / SMTP (optional — falls back to log-only if not set)
-    SMTP_HOST: Optional[str] = None
-    SMTP_PORT: int = 587
-    SMTP_USER: Optional[str] = None
-    SMTP_PASSWORD: Optional[str] = None
-    EMAIL_FROM: str = "noreply@employee-reporting.local"
-
-    # Deadline reminder day (lowercase weekday name, e.g. 'saturday')
-    REMINDER_DAY: str = "saturday"
     
     # CORS
     BACKEND_CORS_ORIGINS: List[str] = [
@@ -70,10 +59,6 @@ class Settings(BaseSettings):
                 )
             # 3. Disable demo users in production
             self.ENABLE_DEMO_USERS = False
-
-        # In testing mode, disable background reminder loop and email sends
-        if env == "test" or os.getenv("TESTING") == "1":
-            self.ENABLE_REMINDER_SCHEDULER = False
 
         return self
 

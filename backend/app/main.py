@@ -6,7 +6,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
 from app.database import db_manager, get_database
 from app.services.seed_data import seed_database
-from app.services.reminder import start_reminder_scheduler
 from app.routers import auth, updates, questions, reports, manager
 
 # Configure logging
@@ -67,19 +66,9 @@ async def lifespan(app: FastAPI):
         await recover_stale_submitting_reports(db, stale_seconds=120)
     except Exception as e:
         logger.warning(f"Could not perform startup stale report recovery: {e}")
-    # Launch background deadline reminder scheduler if enabled
-    reminder_task = None
-    if settings.ENABLE_REMINDER_SCHEDULER:
-        reminder_task = asyncio.create_task(start_reminder_scheduler())
     yield
     # Shutdown
     logger.info("Shutting down application...")
-    if reminder_task:
-        reminder_task.cancel()
-        try:
-            await reminder_task
-        except (asyncio.CancelledError, Exception):
-            pass
     await db_manager.close_database_connection()
 
 app = FastAPI(

@@ -21,16 +21,13 @@ An enterprise-grade, backend-focused full-stack MVP built for the Technical Asse
   - Zero Hallucination Guardrails: Prompts strictly constrain output to actual logged work updates and weekly answers without inventing unperformed tasks.
 - **Enterprise-Grade Security & Data Integrity**:
   - 🔒 **Credential Redaction**: MongoDB URIs and passwords are automatically stripped from all logs and runtime exceptions.
-  - 🛡️ **Email XSS Sanitization**: Dynamic user inputs and AI highlights are fully escaped before insertion into email templates.
   - 🔐 **Employee Route Isolation**: Work update CRUD and weekly report draft/submission routes strictly require Employee role.
   - ⚡ **Atomic Concurrency & Crash Recovery**: `submitting` transition locks drafts against double submission; orphaned submissions auto-recover on restart.
-  - ⏰ **Idempotent Reminders**: Unique compound index claims prevent duplicate reminder emails across multi-instance workers and on-demand triggers.
 - **Bonus Capabilities Included**:
   - 📄 **PDF Generation & Export**: Download official executive report PDFs with branded headers, meta table, AI summary card, question reflections, and daily logs.
   - 🔁 **AI Retry Logic**: Exponential backoff with 2 retries for transient API network hiccups.
   - 📜 **Weekly Report History**: Full timeline drawer to browse past submitted reports.
   - ⚙️ **Configurable Questions**: Manager interface to configure custom weekly question prompts.
-  - 📧 **Simulated Manager Notifications**: Automatic logging and notification trigger upon employee report submission.
 
 ---
 

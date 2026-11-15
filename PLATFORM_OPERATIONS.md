@@ -179,12 +179,6 @@ MongoDB is used as the document store. Documents are structured to support fast,
   - Input lengths and types are validated on both frontend forms and backend Pydantic models.
   - **Production Recommendation**: When deploying to production with a custom corporate domain, configure a unified domain structure (e.g., frontend at `app.company.com` and backend API at `api.company.com` sharing the `.company.com` parent domain). With this topology, the backend can issue `HttpOnly; Secure; SameSite=Lax; Domain=.company.com` cookies, completely shielding tokens from client-side JavaScript access.
 
-### 3.6 Background Reminder Scheduler & Multi-Instance Concurrency
-- Background reminder emails run on an hourly interval checking for approaching deadlines (e.g., Friday afternoons).
-- **Multi-Instance Deduplication**: To prevent duplicate reminder emails if multiple server replicas run simultaneously, the reminder service performs an atomic claim via `reminder_logs` using a compound unique index on `{"user_id": 1, "week_start_date": 1}`.
-- If two backend instances attempt to send a reminder to the same employee for the same week, only the instance that successfully inserts the atomic claim sends the email; all others silently skip.
-- `ENABLE_REMINDER_SCHEDULER` allows toggling the scheduler on a designated worker or disabling it in non-production environments.
-
 ---
 
 ## 4. Cloud Deployment Runbook
@@ -221,7 +215,7 @@ MongoDB is used as the document store. Documents are structured to support fast,
    - `GROQ_MODEL`: `openai/gpt-oss-120b`
    - `BACKEND_CORS_ORIGINS`: `["https://your-frontend-app.vercel.app"]` *(IMPORTANT: Must be your exact Vercel frontend URL. Wildcards are strictly blocked in production)*
    - `ENABLE_DEMO_USERS`: `false` *(Disables public demo credentials endpoint)*
-   - `ENABLE_REMINDER_SCHEDULER`: `true`
+   - `SEED_DEMO_ACCOUNTS`: `true` *(Enables seeding synthetic assessment evaluation accounts on fresh database)*
 5. Click **Create Web Service**.
 6. Note the deployed Render URL: `https://your-backend-app.onrender.com`.
 

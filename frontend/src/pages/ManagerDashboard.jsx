@@ -15,8 +15,7 @@ import {
   Settings,
   AlertCircle,
   Eye,
-  Calendar,
-  Bell
+  Calendar
 } from 'lucide-react';
 
 export const ManagerDashboard = () => {
@@ -27,32 +26,6 @@ export const ManagerDashboard = () => {
   const [statusFilter, setStatusFilter] = useState('');
   const [isQuestionModalOpen, setIsQuestionModalOpen] = useState(false);
   const [downloadingId, setDownloadingId] = useState(null);
-  const [sendingReminders, setSendingReminders] = useState(false);
-  const [reminderToast, setReminderToast] = useState(null);
-
-  const handleSendReminders = async () => {
-    setSendingReminders(true);
-    setReminderToast(null);
-    try {
-      const res = await managerService.sendReminders();
-      const data = res.data;
-      if (data.status === 'success') {
-        setReminderToast({ type: 'success', message: data.message || `Deadline reminders sent to ${data.sent_count} team members!` });
-      } else if (data.status === 'partial_success') {
-        setReminderToast({ type: 'warning', message: data.message });
-      } else if (data.status === 'failed' || data.status === 'smtp_not_configured') {
-        setReminderToast({ type: 'error', message: data.message });
-      } else {
-        // Zero emails sent: all_submitted, already_reminded, no_eligible
-        setReminderToast({ type: 'info', message: data.message });
-      }
-      setTimeout(() => setReminderToast(null), 6000);
-    } catch (err) {
-      setReminderToast({ type: 'error', message: 'Failed to send reminders.' });
-    } finally {
-      setSendingReminders(false);
-    }
-  };
 
   useEffect(() => {
     loadDashboard();
@@ -110,20 +83,6 @@ export const ManagerDashboard = () => {
           </div>
 
           <div className="flex flex-wrap items-center gap-3">
-            <button
-              onClick={handleSendReminders}
-              disabled={sendingReminders}
-              className="px-4 py-2 bg-amber-500 hover:bg-amber-600 text-white text-xs font-semibold rounded-xl shadow-sm flex items-center gap-2 transition-colors disabled:opacity-50"
-              title="Send deadline reminders to direct reports who have not submitted yet this week"
-            >
-              {sendingReminders ? (
-                <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
-              ) : (
-                <Bell className="w-3.5 h-3.5" />
-              )}
-              <span>Remind Team</span>
-            </button>
-
             <Link
               to="/manager/questions"
               className="px-4 py-2 bg-white border border-slate-200 hover:bg-slate-50 text-slate-700 text-xs font-semibold rounded-xl shadow-sm flex items-center gap-2 transition-colors"
@@ -133,28 +92,6 @@ export const ManagerDashboard = () => {
             </Link>
           </div>
         </div>
-
-        {/* Reminder Toast Alert */}
-        {reminderToast && (
-          <div className={`p-4 rounded-2xl text-xs font-semibold flex items-center gap-2 mb-6 shadow-sm border ${
-            reminderToast.type === 'success'
-              ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
-              : reminderToast.type === 'warning'
-              ? 'bg-amber-50 text-amber-800 border-amber-200'
-              : reminderToast.type === 'info'
-              ? 'bg-blue-50 text-blue-800 border-blue-200'
-              : 'bg-red-50 text-red-800 border-red-200'
-          }`}>
-            {reminderToast.type === 'success' ? (
-              <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
-            ) : reminderToast.type === 'info' ? (
-              <Bell className="w-4 h-4 text-blue-600 shrink-0" />
-            ) : (
-              <AlertCircle className="w-4 h-4 text-amber-600 shrink-0" />
-            )}
-            <span>{reminderToast.message}</span>
-          </div>
-        )}
 
         {/* Metric Cards */}
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-5 mb-8">

@@ -9,7 +9,6 @@ from app.main import app
 from app.config import Settings, settings
 from app.database import get_database, db_manager, DatabaseManager, redact_mongo_uri
 from app.services.seed_data import seed_database
-from app.services.email_service import send_manager_notification_email, send_reminder_email
 from unittest.mock import patch, MagicMock
 import json
 import httpx
@@ -21,7 +20,6 @@ from app.services.ai_summary import (
     generate_ai_summary_with_retry,
     _sanitize_error
 )
-from app.services.reminder import run_reminder_check, _get_current_week_boundaries
 from app.auth.jwt import create_access_token, decode_access_token
 
 @pytest.fixture(scope="module")
@@ -154,9 +152,6 @@ async def test_rbac_employee_forbidden_from_manager_routes():
 
         r2 = await client.get("/api/v1/manager/reports", headers=emp_h)
         assert r2.status_code == 403
-
-        r3 = await client.post("/api/v1/manager/send-reminders", headers=emp_h)
-        assert r3.status_code == 403
 
         r4 = await client.post("/api/v1/questions", headers=emp_h, json={"key": "test", "question_text": "text"})
         assert r4.status_code == 403
@@ -470,23 +465,8 @@ async def test_gemini_api_key_sanitization():
     assert "[REDACTED_API_KEY]" in sanitized
 
 # ============================================================================
-# 6. RELIABILITY, PRODUCTION HARDENING & REMINDER IDEMPOTENCY
+# 6. RELIABILITY, PRODUCTION HARDENING
 # ============================================================================
-
-@pytest.mark.anyio
-async def test_reminder_scheduler_atomic_idempotency():
-    """
-    Verifies that running reminder check twice for the same week
-    never dispatches duplicate reminders.
-    """
-    # 1. Run first check
-    res1 = await run_reminder_check(force=True)
-    assert res1["status"] == "success"
-
-    # 2. Run second check immediately: duplicate emails must be 0
-    res2 = await run_reminder_check(force=False)
-    # Today is not reminder_day or all eligible already claimed
-    assert res2.get("sent_count", 0) == 0
 
 @pytest.mark.anyio
 async def test_production_jwt_secret_validation():
@@ -571,28 +551,6 @@ async def test_mongo_uri_redaction():
     # 4. URI with no credentials left untouched
     no_cred_uri = "mongodb://localhost:27017/devdb"
     assert redact_mongo_uri(no_cred_uri) == no_cred_uri
-
-@pytest.mark.anyio
-async def test_email_html_escaping():
-    """Priority 1: Escapes all dynamic content inserted into email HTML."""
-    with patch("app.services.email_service.send_email_async", return_value=True) as mock_send:
-        await send_manager_notification_email(
-            manager_email="mgr@company.com",
-            manager_name="<script>alert('xss')</script>Manager",
-            employee_name="<b>Employee</b>",
-            week_start="2026-11-09",
-            week_end="2026-11-15",
-            ai_highlights=["<img src=x onerror=alert(1)> Highlight"],
-            report_id="12345"
-        )
-        assert mock_send.called
-        body = mock_send.call_args[0][2]
-        assert "<script>" not in body
-        assert "&lt;script&gt;alert(&#x27;xss&#x27;)&lt;/script&gt;" in body
-        assert "<b>Employee</b>" not in body
-        assert "&lt;b&gt;Employee&lt;/b&gt;" in body
-        assert "<img src=x onerror=alert(1)>" not in body
-        assert "&lt;img src=x onerror=alert(1)&gt;" in body
 
 @pytest.mark.anyio
 async def test_rbac_manager_forbidden_from_employee_routes():
@@ -772,34 +730,6 @@ async def test_stale_submitting_report_recovery():
         assert r_sub.status_code == 200
         assert r_sub.json()["status"] == "submitted"
         assert len(r_sub.json().get("work_updates", [])) >= 0
-
-@pytest.mark.anyio
-async def test_reminders_force_true_idempotent_and_smtp_failure():
-    """Priority 3: Manual reminders idempotent (force=True does not duplicate) and unconfirmed SMTP marked failed."""
-    db = get_database()
-    await db.reminder_logs.delete_many({})
-
-    # 1. Run reminder check with force=True -> sends reminders
-    res1 = await run_reminder_check(force=True)
-    assert res1["status"] == "success"
-    sent1 = res1["sent_count"]
-    assert sent1 > 0
-
-    # 2. Run reminder check again immediately with force=True -> duplicate count must be 0!
-    res2 = await run_reminder_check(force=True)
-    assert res2["status"] == "already_reminded"
-    assert res2["sent_count"] == 0, "Repeated manager reminder must be idempotent even with force=True"
-
-    # 3. Test SMTP failure does not record reminder as sent
-    await db.reminder_logs.delete_many({})
-    with patch("app.services.reminder.send_reminder_email", return_value=False):
-        with patch.dict(os.environ, {"TESTING": "0"}):
-            res_fail = await run_reminder_check(force=True)
-            assert res_fail["sent_count"] == 0
-            failed_logs = await db.reminder_logs.find({"status": "failed"}).to_list(10)
-            assert len(failed_logs) > 0
-            sent_logs = await db.reminder_logs.find({"status": "sent"}).to_list(10)
-            assert len(sent_logs) == 0
 
 @pytest.mark.anyio
 async def test_mocked_gemini_groq_local_fallback_sequence():
@@ -1689,171 +1619,3 @@ async def test_registration_employee_cannot_assign_arbitrary_manager_at_signup()
         legit_doc = await db.users.find_one({"email": legit_email})
         assert legit_doc["manager_id"] is None
 
-@pytest.mark.anyio
-async def test_team_reminder_result_handling_eight_scenarios():
-    """Requirement 1: Test all 8 reminder scenarios verifying accurate counts, idempotency, and status."""
-    db = get_database()
-    week_start, week_end = _get_current_week_boundaries()
-
-    # Scenario 1: Manager has two eligible employees and both emails succeed
-    mgr1_oid = ObjectId()
-    await db.users.insert_one({
-        "_id": mgr1_oid,
-        "name": "Reminder Manager 1",
-        "email": f"rem.mgr1.{int(datetime.utcnow().timestamp())}@company.com",
-        "role": "manager"
-    })
-    emp1_oid = ObjectId()
-    emp2_oid = ObjectId()
-    await db.users.insert_many([
-        {"_id": emp1_oid, "name": "Emp 1", "email": f"rem.emp1.{int(datetime.utcnow().timestamp())}@company.com", "role": "employee", "manager_id": str(mgr1_oid)},
-        {"_id": emp2_oid, "name": "Emp 2", "email": f"rem.emp2.{int(datetime.utcnow().timestamp())}@company.com", "role": "employee", "manager_id": str(mgr1_oid)},
-    ])
-
-    res1 = await run_reminder_check(manager_id=str(mgr1_oid), force=True)
-    assert res1["status"] == "success"
-    assert res1["eligible_count"] == 2
-    assert res1["sent_count"] == 2
-    assert res1["skipped_count"] == 0
-    assert res1["failed_count"] == 0
-    assert len(res1["reminded_employees"]) == 2
-
-    # Scenario 8: A second reminder request does not duplicate successful reminders
-    res8 = await run_reminder_check(manager_id=str(mgr1_oid), force=True)
-    assert res8["status"] == "already_reminded"
-    assert res8["sent_count"] == 0
-    assert res8["eligible_count"] == 0
-    assert res8["skipped_count"] == 2
-    assert res8["skipped_details"]["already_reminded_count"] == 2
-
-    # Scenario 2: No employees are assigned to the manager
-    mgr2_oid = ObjectId()
-    await db.users.insert_one({
-        "_id": mgr2_oid,
-        "name": "Reminder Manager 2 (Empty)",
-        "email": f"rem.mgr2.{int(datetime.utcnow().timestamp())}@company.com",
-        "role": "manager"
-    })
-    res2 = await run_reminder_check(manager_id=str(mgr2_oid), force=True)
-    assert res2["status"] == "no_eligible"
-    assert res2["eligible_count"] == 0
-    assert res2["sent_count"] == 0
-    assert res2["skipped_details"]["no_employees_assigned"] is True
-
-    # Scenario 3: All assigned employees have submitted their reports
-    mgr3_oid = ObjectId()
-    await db.users.insert_one({
-        "_id": mgr3_oid,
-        "name": "Reminder Manager 3",
-        "email": f"rem.mgr3.{int(datetime.utcnow().timestamp())}@company.com",
-        "role": "manager"
-    })
-    emp3a_oid = ObjectId()
-    emp3b_oid = ObjectId()
-    await db.users.insert_many([
-        {"_id": emp3a_oid, "name": "Emp 3A", "email": f"rem.emp3a.{int(datetime.utcnow().timestamp())}@company.com", "role": "employee", "manager_id": str(mgr3_oid)},
-        {"_id": emp3b_oid, "name": "Emp 3B", "email": f"rem.emp3b.{int(datetime.utcnow().timestamp())}@company.com", "role": "employee", "manager_id": str(mgr3_oid)},
-    ])
-    await db.weekly_reports.insert_many([
-        {"_id": ObjectId(), "user_id": str(emp3a_oid), "week_start_date": week_start, "week_end_date": week_end, "status": "submitted"},
-        {"_id": ObjectId(), "user_id": str(emp3b_oid), "week_start_date": week_start, "week_end_date": week_end, "status": "submitted"},
-    ])
-    res3 = await run_reminder_check(manager_id=str(mgr3_oid), force=True)
-    assert res3["status"] == "all_submitted"
-    assert res3["eligible_count"] == 0
-    assert res3["sent_count"] == 0
-    assert res3["skipped_count"] == 2
-    assert res3["skipped_details"]["submitted_count"] == 2
-
-    # Scenario 4: Both employees were already reminded
-    mgr4_oid = ObjectId()
-    await db.users.insert_one({
-        "_id": mgr4_oid,
-        "name": "Reminder Manager 4",
-        "email": f"rem.mgr4.{int(datetime.utcnow().timestamp())}@company.com",
-        "role": "manager"
-    })
-    emp4a_oid = ObjectId()
-    emp4b_oid = ObjectId()
-    await db.users.insert_many([
-        {"_id": emp4a_oid, "name": "Emp 4A", "email": f"rem.emp4a.{int(datetime.utcnow().timestamp())}@company.com", "role": "employee", "manager_id": str(mgr4_oid)},
-        {"_id": emp4b_oid, "name": "Emp 4B", "email": f"rem.emp4b.{int(datetime.utcnow().timestamp())}@company.com", "role": "employee", "manager_id": str(mgr4_oid)},
-    ])
-    now = datetime.utcnow()
-    await db.reminder_logs.insert_many([
-        {"user_id": str(emp4a_oid), "week_start_date": week_start, "type": "deadline_reminder", "status": "sent", "sent_at": now},
-        {"user_id": str(emp4b_oid), "week_start_date": week_start, "type": "deadline_reminder", "status": "sent", "sent_at": now},
-    ])
-    res4 = await run_reminder_check(manager_id=str(mgr4_oid), force=True)
-    assert res4["status"] == "already_reminded"
-    assert res4["eligible_count"] == 0
-    assert res4["sent_count"] == 0
-    assert res4["skipped_count"] == 2
-    assert res4["skipped_details"]["already_reminded_count"] == 2
-
-    # Scenario 5: SMTP is not configured
-    mgr5_oid = ObjectId()
-    await db.users.insert_one({
-        "_id": mgr5_oid,
-        "name": "Reminder Manager 5",
-        "email": f"rem.mgr5.{int(datetime.utcnow().timestamp())}@company.com",
-        "role": "manager"
-    })
-    emp5a_oid = ObjectId()
-    emp5b_oid = ObjectId()
-    await db.users.insert_many([
-        {"_id": emp5a_oid, "name": "Emp 5A", "email": f"rem.emp5a.{int(datetime.utcnow().timestamp())}@company.com", "role": "employee", "manager_id": str(mgr5_oid)},
-        {"_id": emp5b_oid, "name": "Emp 5B", "email": f"rem.emp5b.{int(datetime.utcnow().timestamp())}@company.com", "role": "employee", "manager_id": str(mgr5_oid)},
-    ])
-    with patch("app.services.email_service.is_smtp_configured", return_value=False):
-        res5 = await run_reminder_check(manager_id=str(mgr5_oid), force=True)
-        assert res5["status"] == "smtp_not_configured"
-        assert res5["eligible_count"] == 2
-        assert res5["sent_count"] == 0
-        assert res5["failed_count"] == 2
-        assert len(res5["failed_employees"]) == 2
-
-    # Scenario 6: SMTP fails for all recipients
-    mgr6_oid = ObjectId()
-    await db.users.insert_one({
-        "_id": mgr6_oid,
-        "name": "Reminder Manager 6",
-        "email": f"rem.mgr6.{int(datetime.utcnow().timestamp())}@company.com",
-        "role": "manager"
-    })
-    emp6a_oid = ObjectId()
-    emp6b_oid = ObjectId()
-    await db.users.insert_many([
-        {"_id": emp6a_oid, "name": "Emp 6A", "email": f"rem.emp6a.{int(datetime.utcnow().timestamp())}@company.com", "role": "employee", "manager_id": str(mgr6_oid)},
-        {"_id": emp6b_oid, "name": "Emp 6B", "email": f"rem.emp6b.{int(datetime.utcnow().timestamp())}@company.com", "role": "employee", "manager_id": str(mgr6_oid)},
-    ])
-    with patch("app.services.reminder.send_reminder_email", return_value=False):
-        res6 = await run_reminder_check(manager_id=str(mgr6_oid), force=True)
-        assert res6["status"] == "failed"
-        assert res6["eligible_count"] == 2
-        assert res6["sent_count"] == 0
-        assert res6["failed_count"] == 2
-        assert len(res6["failed_employees"]) == 2
-
-    # Scenario 7: One email succeeds and another fails
-    mgr7_oid = ObjectId()
-    await db.users.insert_one({
-        "_id": mgr7_oid,
-        "name": "Reminder Manager 7",
-        "email": f"rem.mgr7.{int(datetime.utcnow().timestamp())}@company.com",
-        "role": "manager"
-    })
-    emp7a_oid = ObjectId()
-    emp7b_oid = ObjectId()
-    await db.users.insert_many([
-        {"_id": emp7a_oid, "name": "Emp 7A", "email": f"rem.emp7a.{int(datetime.utcnow().timestamp())}@company.com", "role": "employee", "manager_id": str(mgr7_oid)},
-        {"_id": emp7b_oid, "name": "Emp 7B", "email": f"rem.emp7b.{int(datetime.utcnow().timestamp())}@company.com", "role": "employee", "manager_id": str(mgr7_oid)},
-    ])
-    with patch("app.services.reminder.send_reminder_email", side_effect=[True, False]):
-        res7 = await run_reminder_check(manager_id=str(mgr7_oid), force=True)
-        assert res7["status"] == "partial_success"
-        assert res7["eligible_count"] == 2
-        assert res7["sent_count"] == 1
-        assert res7["failed_count"] == 1
-        assert len(res7["reminded_employees"]) == 1
-        assert len(res7["failed_employees"]) == 1

@@ -15,7 +15,6 @@ from app.models.update import WorkUpdateResponse
 from app.auth.dependencies import get_current_user, require_employee
 from app.services.ai_summary import generate_ai_summary_with_retry
 from app.services.pdf_export import generate_weekly_report_pdf
-from app.services.email_service import send_manager_notification_email
 
 logger = logging.getLogger(__name__)
 
@@ -479,35 +478,6 @@ async def submit_weekly_report(
         )
 
     updated_report = await db.weekly_reports.find_one({"_id": r_oid})
-
-    # Automated manager notification (Bonus feature: Email manager upon submission)
-    manager_id = report.get("manager_id")
-    is_test = os.getenv("TESTING") == "1"
-    if manager_id:
-        try:
-            try:
-                m_oid = ObjectId(manager_id)
-            except Exception:
-                m_oid = manager_id
-            manager = await db.users.find_one({"_id": m_oid})
-            if manager and manager.get("email"):
-                highlights = ai_summary_dict.get("key_highlights", []) if ai_summary_dict else []
-                if is_test:
-                    logger.info(f"[TESTING] Suppressed email to manager {manager['email']}")
-                else:
-                    await send_manager_notification_email(
-                        manager_email=manager["email"],
-                        manager_name=manager.get("name", "Manager"),
-                        employee_name=current_user.get("name", "Employee"),
-                        week_start=report["week_start_date"],
-                        week_end=report["week_end_date"],
-                        ai_highlights=highlights,
-                        report_id=str(r_oid),
-                    )
-            else:
-                logger.info(f"Manager {manager_id} has no registered email. Skipped notification.")
-        except Exception as e:
-            logger.warning(f"Could not send manager notification email: {e}")
 
     populated = await populate_report_details(updated_report, db)
     return WeeklyReportResponse(**populated)
