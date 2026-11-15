@@ -1,124 +1,370 @@
 # 🚀 Employee Work & Weekly Reporting System
 
-An enterprise-grade, backend-focused full-stack MVP built for the Technical Assessment. Employees log daily work updates and complete four weekly reflection questions; on submission, the backend automatically generates a structured **AI Executive Summary** using Google Gemini (with multi-tier fallback and retry logic) and immediately routes the read-only report to the employee's assigned manager.
+An enterprise-grade, backend-focused full-stack application built for technical assessment evaluation. The system enables employees to track daily work activities and complete standardized weekly reflection questions. Upon submission, the backend coordinates an atomic concurrency lock, marks the report immutable (read-only), triggers a multi-tier **AI Executive Summary** engine (Google Gemini → Groq Cloud → Deterministic Local NLP Heuristic), and routes the finalized report to the employee's assigned manager for oversight and official PDF export.
 
 ---
 
-## 🌟 Key Highlights & Assessment Deliverables
+## 📋 Table of Contents
 
-- **Backend-Focused Architecture**: Clean, modular FastAPI with async motor/pymongo MongoDB driver, Pydantic v2 schemas, and strict separation of concerns.
-- **Strict Role-Based Access Control (RBAC)**:
-  - **Employee**: Can only view, create, and modify their own work updates and reports.
-  - **Manager**: Can only inspect reports belonging to their assigned direct reports (cross-team access is blocked with HTTP 403 Forbidden).
-- **Core Weekly Workflow**:
-  - Daily Work Updates CRUD with category tags & hours tracked.
-  - Four Weekly Reflection Questions with draft saving and auto-recovery.
-  - One-click report submission locking the report into immutable **Read-Only** mode.
-- **Free-Tier AI Integration with Multi-Tier Fallback & Retry**:
-  - Primary: **Google Gemini 3.5 Flash-Lite** (`gemini-3.5-flash-lite`, Free Tier via Google AI Studio).
-  - Secondary: **Groq Llama-3.1-8b** (Free Tier).
-  - Resilient Fallback: Built-in deterministic NLP heuristic engine ensuring 100% submission reliability even if external APIs or network connectivity are offline.
-  - Zero Hallucination Guardrails: Prompts strictly constrain output to actual logged work updates and weekly answers without inventing unperformed tasks.
-- **Enterprise-Grade Security & Data Integrity**:
-  - 🔒 **Credential Redaction**: MongoDB URIs and passwords are automatically stripped from all logs and runtime exceptions.
-  - 🔐 **Employee Route Isolation**: Work update CRUD and weekly report draft/submission routes strictly require Employee role.
-  - ⚡ **Atomic Concurrency & Crash Recovery**: `submitting` transition locks drafts against double submission; orphaned submissions auto-recover on restart.
-- **Bonus Capabilities Included**:
-  - 📄 **PDF Generation & Export**: Download official executive report PDFs with branded headers, meta table, AI summary card, question reflections, and daily logs.
-  - 🔁 **AI Retry Logic**: Exponential backoff with 2 retries for transient API network hiccups.
-  - 📜 **Weekly Report History**: Full timeline drawer to browse past submitted reports.
-  - ⚙️ **Configurable Questions**: Manager interface to configure custom weekly question prompts.
+- [Project Overview](#-project-overview)
+- [Key Features](#-key-features)
+- [Architecture & Tech Stack](#-architecture--tech-stack)
+- [System Architecture Diagram](#-system-architecture-diagram)
+- [Repository Structure](#-repository-structure)
+- [Seeded Demo Accounts & Credentials](#-seeded-demo-accounts--credentials)
+- [AI Engine & Multi-Tier Fallback Strategy](#-ai-engine--multi-tier-fallback-strategy)
+- [API Reference](#-api-reference)
+- [Local Development Setup](#-local-development-setup)
+- [Cloud Deployment Guide (Atlas + Render + Vercel)](#-cloud-deployment-guide-atlas--render--vercel)
+- [Testing & Verification](#-testing--verification)
 
 ---
 
-## 🔑 Seeded Demo Credentials
+## 🌟 Project Overview
 
-No external SSO or HR integration is required. The system auto-seeds realistic demo accounts with hierarchical reporting relationships upon first launch:
+### What the System Does
+The **Employee Work & Weekly Reporting System** provides a structured, role-segregated platform for team accountability and weekly status synthesis:
+- **Employees** log daily work entries (with titles, category tags, descriptions, and hours spent), complete four standardized weekly reflection questions, save drafts, and submit finalized weekly reports.
+- **Managers** review their assigned direct reports' submissions, inspect AI-generated executive summaries and recommendations, customize organization-wide reflection questions, manage team assignments, and export branded PDF reports.
 
-| Role | Name | Email | Password | Assigned Relationship |
-| :--- | :--- | :--- | :--- | :--- |
-| **Manager** | **Sarah Chen** | `manager@company.com` | `Manager@123` | Engineering Manager (Manages Alex & Priya) |
-| **Employee** | **Alex Rivera** | `alex@company.com` | `Employee@123` | Senior Engineer (Reports to Sarah Chen) |
-| **Employee** | **Priya Patel** | `priya@company.com` | `Employee@123` | Frontend Engineer (Reports to Sarah Chen) |
-| **Manager** | **David Miller** | `david.manager@company.com` | `Manager@123` | Product Manager (Manages Marcus) |
-| **Employee** | **Marcus Johnson** | `marcus@company.com` | `Employee@123` | UI/UX Designer (Reports to David Miller) |
+### The Problem It Solves
+Engineering teams frequently suffer from:
+1. **Status Fragmentation**: Work updates scattered across Slack, Jira comments, and disjointed email threads.
+2. **Managerial Overhead**: Managers spending hours each week reading through raw task logs to synthesize progress, identify blockers, and formulate next steps.
+3. **Data Inconsistency & Submission Races**: Concurrent edits and race conditions between draft edits and report finalization leading to corrupt or partial weekly submissions.
+4. **Fragile External Integrations**: LLM-dependent reporting systems failing completely whenever an external AI API experiences downtime, rate limits, or network timeouts.
 
-> 💡 *The UI includes **1-Click Demo Login Buttons** on the sign-in screen to instantly switch between roles without manually typing credentials!*
+### Who Uses It
+- **Employees**: Log daily tasks, draft reflection answers, track hours, submit reports, and review submission history.
+- **Managers**: Monitor team compliance, review submitted reports, read AI-synthesized summaries, download branded PDFs, assign team members, and configure reflection prompts.
+
+### The End-to-End Workflow
+```
+[Daily Work Updates] ──> [Current Week Draft Auto-Linked] ──> [4 Reflection Answers]
+                                                                        │
+[Manager Dashboard]  <──  [Immutable PDF / AI Summary]   <──  [Atomic Submission Lock]
+```
+1. **Daily Logging**: Employees log work items across categories (`Feature`, `Bug Fix`, `Refactoring`, `Documentation`, `Meeting`, `Research`).
+2. **Weekly Draft Aggregation**: The system automatically aggregates all work updates falling within the Monday-to-Sunday cycle into the employee's weekly draft.
+3. **Reflection Questions**: The employee answers four mandatory reflection questions (Accomplishments, In Progress, Blockers, Next Priorities).
+4. **Atomic Submission**: When submitted, the backend acquires an exclusive ownership claim token, validates answers, snapshots updates, and transitions the report to `submitted`.
+5. **AI Synthesis**: The report triggers the 3-tier AI summarization pipeline. If Gemini or Groq are unavailable, the local deterministic NLP heuristic engine guarantees 100% completion reliability.
+6. **Manager Review & PDF Export**: The report becomes strictly read-only. The manager inspects the report, reviews AI highlights and blocker recommendations, and exports an executive PDF.
 
 ---
 
-## 🛠️ Tech Stack
+## ✨ Key Features
 
-- **Backend**: Python 3.11+ / FastAPI / Uvicorn / Pydantic v2 / PyJWT / Bcrypt / ReportLab
-- **Database**: MongoDB / MongoDB Atlas (with in-memory async mock auto-detection for local testing)
-- **Frontend**: React 18 / Vite / Tailwind CSS / Lucide React / Axios / React Router v6
-- **AI Provider**: Google Gemini 2.5 Flash API (free tier) + Groq Llama-3.1 + Deterministic Heuristic Fallback
-- **Deployment**: Vercel (Frontend SPA) + Render (FastAPI Web Service)
+- **Authentication & RBAC**:
+  - Secure bcrypt password hashing and 7-day HS256 JWT access tokens.
+  - Strict server-side role separation: Employees cannot access managerial routes; Managers cannot modify employee work logs.
+  - Cross-Manager Isolation: Managers can only view and inspect reports belonging strictly to their assigned direct reports.
+- **Daily Work Updates CRUD**:
+  - Full CRUD operations with hours validation (`0 < hours <= 24`), date boundaries, and categorization.
+  - Immutability Lock: Work updates belonging to an already submitted week cannot be edited or deleted.
+- **Weekly Reporting & Draft Management**:
+  - Auto-creation of drafts for the current Monday-to-Sunday cycle.
+  - Real-time draft auto-saving with full recovery across sessions.
+  - Mandatory validation requiring non-empty answers for all 4 reflection questions before submission.
+- **Atomic Concurrency & Crash Recovery**:
+  - Ownership-aware mutation lease protocol preventing race conditions between concurrent work updates and report submissions.
+  - Automatic startup recovery reclaiming orphaned submissions (>120s) back to draft.
+- **Multi-Tier AI Summarization**:
+  - Primary: Google Gemini 3.5 Flash-Lite via Google AI Studio.
+  - Secondary: Groq Cloud LLM (`openai/gpt-oss-120b`).
+  - Offline Fallback: Deterministic local heuristic NLP engine that parses categories, hours, milestones, and blockers without external network calls.
+- **Manager Oversight & Configuration**:
+  - Team dashboard displaying submission status, AI summary snippets, and compliance counters.
+  - Configurable weekly questions modal and management page (create, edit, toggle active/inactive).
+  - Team assignment controls: assign and unassign direct reports dynamically.
+- **Executive PDF Export**:
+  - Server-side branded PDF generation via ReportLab with metadata tables, AI summaries, question reflections, and daily logs.
+- **Report History**:
+  - Historical timeline drawer enabling employees to view and download past weekly submissions.
+
+---
+
+## 🏗️ Architecture & Tech Stack
+
+| Layer | Technologies | Purpose |
+|---|---|---|
+| **Frontend** | React 18, Vite, Tailwind CSS, Lucide Icons, Axios, React Router v6 | Responsive SPA with client-side RBAC guards, draft saving, and real-time state |
+| **Backend** | Python 3.11+, FastAPI, Uvicorn, Pydantic v2, PyJWT, PassLib (Bcrypt) | High-performance asynchronous REST API with dependency injection & strict validation |
+| **Database** | MongoDB Atlas, Motor (AsyncIOMotorClient), mongomock | Document persistence with compound indexes, transactions, and dev fallback |
+| **PDF Engine** | ReportLab | Programmatic vector PDF compilation with corporate headers and tabular formatting |
+| **AI Providers** | Google Gemini 3.5 Flash-Lite, Groq Cloud, Local NLP Heuristic | Multi-tier executive summary generation with zero-hallucination guardrails |
+| **Hosting** | Vercel (Frontend SPA) + Render (Backend Web Service) | Production cloud deployment with SPA rewrites and health monitoring |
+
+---
+
+## 📐 System Architecture Diagram
+
+```mermaid
+flowchart TD
+    subgraph Users["Users"]
+        EMP["Employee (Alex Rivera, Priya Patel)"]
+        MGR["Manager (Sarah Chen, David Miller)"]
+    end
+
+    subgraph Frontend["React 18 + Vite SPA (Vercel)"]
+        AUTH_CTX["AuthContext (JWT & Role State)"]
+        EMP_UI["Employee Dashboard & Daily Updates"]
+        REP_UI["Weekly Report Workflow (4 Reflection Qs)"]
+        MGR_UI["Manager Dashboard & Report Inspector"]
+        PDF_UI["PDF Export & History Drawer"]
+        API_SVC["Axios API Client (Bearer Token Interceptor)"]
+    end
+
+    subgraph Backend["FastAPI Backend (Render)"]
+        ROUTERS["API Routers (/api/v1)"]
+        AUTH_DEP["Security & RBAC Middleware (require_employee, require_manager)"]
+        
+        subgraph Endpoints["Route Modules"]
+            AUTH_R["/auth (JWT Login & Registration)"]
+            UPD_R["/updates (Daily Work Update CRUD)"]
+            REP_R["/reports (Drafts, Submission & Concurrency Locks)"]
+            MGR_R["/manager (Assigned Team Oversight & Access Isolation)"]
+            QST_R["/questions (Reflection Question Config)"]
+            HLT_R["/health (MongoDB Live Ping Probe)"]
+        end
+
+        subgraph CoreServices["Domain Services"]
+            AI_SVC["AI Summary Engine (3-Tier Fallback)"]
+            PDF_SVC["ReportLab PDF Generator"]
+            SEED_SVC["Idempotent Synthetic Demo Seeder"]
+        end
+    end
+
+    subgraph DataExternal["Storage & AI Providers"]
+        MONGO[("MongoDB Atlas Database\n(Users, Work Updates, Reports, Questions)")]
+        GEMINI["Google Gemini 3.5 Flash-Lite (Primary LLM)"]
+        GROQ["Groq Cloud / GPT-OSS-120B (Secondary LLM)"]
+        LOCAL_NLP["Deterministic Local Heuristic Engine (Offline Fallback)"]
+    end
+
+    EMP --> AUTH_CTX
+    EMP --> EMP_UI
+    EMP --> REP_UI
+    MGR --> AUTH_CTX
+    MGR --> MGR_UI
+    MGR --> PDF_UI
+
+    EMP_UI & REP_UI & MGR_UI & PDF_UI --> API_SVC
+    API_SVC -->|"HTTPS + JWT Bearer"| ROUTERS
+
+    ROUTERS --> AUTH_DEP
+    AUTH_DEP --> Endpoints
+
+    UPD_R & REP_R & MGR_R & QST_R --> MONGO
+    REP_R -->|"Trigger on Submit"| AI_SVC
+    REP_R & MGR_R --> PDF_SVC
+    HLT_R -->|"Ping"| MONGO
+
+    AI_SVC -->|"1. Primary"| GEMINI
+    AI_SVC -->|"2. Secondary Fallback"| GROQ
+    AI_SVC -->|"3. Zero-Failure Fallback"| LOCAL_NLP
+```
 
 ---
 
 ## 📁 Repository Structure
 
 ```
-BharatRohan_Assess/
+employee_reporting_system/
+├── render.yaml                    # Canonical Render Cloud Blueprint specification
+├── README.md                      # Primary project documentation & evaluation guide
+├── PLATFORM_OPERATIONS.md         # Comprehensive operations & security architecture manual
+├── .gitignore                     # Git ignore rules (protects credentials, venv, cache)
+│
 ├── backend/
 │   ├── app/
-│   │   ├── auth/              # JWT tokens, Bcrypt security, RBAC dependencies
-│   │   ├── models/            # Pydantic data validation schemas
-│   │   ├── routers/           # REST endpoints: auth, updates, questions, reports, manager
-│   │   ├── services/          # AI summary engine, ReportLab PDF exporter, seed data
-│   │   ├── config.py          # Environment settings with pydantic-settings
-│   │   ├── database.py        # MongoDB connection manager (Atlas + Motor + Mock)
-│   │   └── main.py            # FastAPI entry point, CORS, lifespan hooks
-│   ├── tests/
-│   │   └── test_api.py        # Pytest integration test suite
-│   ├── test_runner.py         # Standalone E2E verification test suite
-│   ├── seed.py                # Standalone database re-seeder
-│   ├── requirements.txt       # Python dependencies
-│   ├── Dockerfile             # Multi-stage production container build
-│   ├── render.yaml            # Render infrastructure blueprint
-│   ├── Procfile               # Render web start command
-│   └── .env.example           # Backend environment template
-├── frontend/
-│   ├── src/
-│   │   ├── components/        # Navbar, WorkUpdateModal, AISummaryCard, QuestionModal
-│   │   ├── context/           # AuthContext (JWT session state & RBAC)
-│   │   ├── pages/             # Login, EmployeeDashboard, WeeklyReportPage, ManagerDashboard, ReportDetailView
-│   │   ├── services/          # Axios API service client
-│   │   ├── App.jsx            # React Router v6 tree with role guards
-│   │   └── main.jsx           # Root DOM renderer
-│   ├── package.json           # Node scripts & dependencies
-│   ├── vite.config.js         # Vite configuration with /api proxy
-│   ├── tailwind.config.js     # Tailwind CSS theme extension
-│   ├── vercel.json            # Vercel SPA routing rewrites
-│   └── .env.example           # Frontend environment template
-├── PLATFORM_OPERATIONS.md     # Detailed Platform Operations Document
-└── README.md                  # System overview and quickstart guide
+│   │   ├── auth/                  # Security & authentication layer
+│   │   │   ├── dependencies.py    # FastAPI dependencies (require_employee, require_manager)
+│   │   │   ├── jwt.py             # JWT token creation, decoding, and validation
+│   │   │   └── security.py        # PassLib bcrypt password hashing & verification
+│   │   ├── models/                # Pydantic v2 validation models
+│   │   │   ├── question.py        # Weekly reflection question schemas
+│   │   │   ├── report.py          # Weekly report schemas, answers, AI summary models
+│   │   │   ├── update.py          # Daily work update schemas & category constraints
+│   │   │   └── user.py            # User registration, login, and response schemas
+│   │   ├── routers/               # Modular FastAPI route controllers
+│   │   │   ├── auth.py            # Authentication, registration, me, demo-users endpoints
+│   │   │   ├── manager.py         # Team member overview, report inspection, assignment
+│   │   │   ├── questions.py       # CRUD & toggle endpoints for reflection questions
+│   │   │   ├── reports.py         # Draft saving, submission locking, history, PDF export
+│   │   │   └── updates.py         # Daily work update CRUD & concurrency leases
+│   │   ├── services/              # Domain logic services
+│   │   │   ├── ai_summary.py      # 3-tier AI engine (Gemini -> Groq -> Local Heuristic)
+│   │   │   ├── pdf_export.py      # ReportLab branded PDF generator
+│   │   │   └── seed_data.py       # Idempotent demo account & question seeder
+│   │   ├── config.py              # Environment settings (Pydantic-Settings) & CORS parsing
+│   │   ├── database.py            # MongoDB connection manager (Motor AsyncIO client)
+│   │   └── main.py                # FastAPI app initialization, CORS middleware, lifespan
+│   ├── tests/                     # Automated test suites
+│   │   ├── conftest.py            # Pytest module fixtures & test database setup
+│   │   ├── test_api.py            # Core endpoint regression suite
+│   │   └── test_comprehensive.py  # 46 deep tests: RBAC, concurrency, leases, fallbacks
+│   ├── Dockerfile                 # Containerized backend build
+│   ├── Procfile                   # Process file for web runtime
+│   ├── pytest.ini                 # Pytest configuration
+│   ├── requirements.txt           # Pinned Python package dependencies
+│   ├── seed.py                    # Standalone CLI database seeding script
+│   ├── test_gemini_live.py        # Direct script to verify live Gemini API keys
+│   ├── test_runner.py             # Standalone E2E verification test runner
+│   └── .env.example               # Backend environment variables template
+│
+└── frontend/
+    ├── src/
+    │   ├── components/            # Reusable React UI components
+    │   │   ├── AISummaryCard.jsx  # Card displaying AI-synthesized executive summary
+    │   │   ├── Navbar.jsx         # App navigation bar with user profile & logout
+    │   │   ├── ProtectedRoute.jsx # Client-side role-based routing guard
+    │   │   ├── QuestionConfigModal.jsx # Modal to manage reflection questions
+    │   │   └── WorkUpdateModal.jsx# Modal to create and edit daily work updates
+    │   ├── context/
+    │   │   └── AuthContext.jsx    # React Context managing JWT token, user, and role
+    │   ├── pages/                 # Full application views
+    │   │   ├── EmployeeDashboard.jsx # Employee updates, draft preview, submission action
+    │   │   ├── Login.jsx          # Login view with 1-click evaluation switcher
+    │   │   ├── ManagerDashboard.jsx  # Manager team overview, reports list, PDF triggers
+    │   │   ├── NotFound.jsx       # 404 error view
+    │   │   ├── QuestionManagerPage.jsx # Full page to configure weekly questions
+    │   │   ├── ReportDetailView.jsx  # In-depth inspection of submitted report & updates
+    │   │   ├── ReportHistoryPage.jsx # Past submitted weekly reports timeline
+    │   │   ├── Signup.jsx         # New employee registration view
+    │   │   └── WeeklyReportPage.jsx  # 4 questions answer form & submit screen
+    │   ├── services/
+    │   │   └── api.js             # Axios client with Bearer token interceptor
+    │   ├── utils/
+    │   │   └── validators.js      # Client-side input validation helpers
+    │   ├── App.jsx                # Route definitions and application layout
+    │   ├── index.css              # Tailwind CSS styles and font configuration
+    │   └── main.jsx               # React DOM entry point
+    ├── test/
+    │   └── frontend_suite.test.js # Node native test suite for validations and RBAC
+    ├── package.json               # Frontend dependencies & build scripts
+    ├── postcss.config.js          # PostCSS configuration
+    ├── tailwind.config.js         # Tailwind CSS styling configuration
+    ├── vercel.json                # Vercel SPA client-side rewrite configuration
+    ├── vite.config.js             # Vite development server & proxy settings
+    └── .env.example               # Frontend environment variables template
 ```
 
 ---
 
-## 🚀 Local Quickstart Guide
+## 🔑 Seeded Demo Accounts & Credentials
 
-### 1. Prerequisites
-- Python 3.10+ installed
-- Node.js v18+ and npm installed
-- *(Optional)* Local MongoDB or MongoDB Atlas URI (if not running, the system automatically uses the zero-config in-memory mock database)
+The application includes an idempotent synthetic demo database seeder (`backend/app/services/seed_data.py`). When `SEED_DEMO_ACCOUNTS=true` is enabled, the following synthetic evaluation accounts are provisioned:
+
+| Role | Name | Email | Password | Organization Unit | Reporting Relationship |
+|:---|:---|:---|:---|:---|:---|
+| **Manager** | **Sarah Chen** | `manager@company.com` | `Manager@123` | Engineering Core | Direct Manager of Alex Rivera & Priya Patel |
+| **Manager** | **David Miller** | `david.manager@company.com` | `Manager@123` | Product & UX | Manager of Marcus Johnson (Cross-Manager Isolation) |
+| **Employee** | **Alex Rivera** | `alex@company.com` | `Employee@123` | Engineering Core | Senior Software Engineer (Reports to Sarah Chen) |
+| **Employee** | **Priya Patel** | `priya@company.com` | `Employee@123` | Engineering Core | Frontend Engineer (Reports to Sarah Chen) |
+| **Employee** | **Marcus Johnson** | `marcus@company.com` | `Employee@123` | Product & UX | UI/UX Designer (Reports to David Miller) |
+
+> 🔒 **Security Notice**:
+> - These credentials are **strictly synthetic evaluation accounts** intended for assessment demonstration.
+> - In production environments, set `ENABLE_DEMO_USERS=false` to disable the public `/api/v1/auth/demo-users` discovery endpoint.
+> - After your initial deployment has seeded these accounts, set `SEED_DEMO_ACCOUNTS=false` in Render to permanently bypass seeding checks on subsequent service restarts.
 
 ---
 
-### 2. Backend Setup
+## 🤖 AI Engine & Multi-Tier Fallback Strategy
+
+The AI summarization engine (`backend/app/services/ai_summary.py`) analyzes the employee's work updates and weekly answers to produce:
+1. **Executive Summary**: A concise 2–3 sentence overview grounded strictly in logged achievements.
+2. **Key Highlights**: Bullet points summarizing the highest-impact completed items.
+3. **Blockers Identified**: Explicit challenges surfaced from the reflection prompt.
+4. **Manager Recommendation**: 1–2 actionable suggestions on how the manager can support the employee.
+
+### 5-Step Resilient Execution Pipeline
+
+```
+1. Check GEMINI_API_KEY
+   ├── Set? ──> Call Gemini 3.5 Flash-Lite (up to 2 attempts with exponential retry)
+   │             ├── Success ──> Return structured summary (model: Google Gemini 3.5 Flash-Lite)
+   │             └── Failure ──> Log sanitized error (API key redacted) & proceed to step 2
+   └── Not Set ──> Proceed to step 2
+
+2. Check GROQ_API_KEY
+   ├── Set? ──> Call Groq Cloud (openai/gpt-oss-120b, up to 2 attempts with retry)
+   │             ├── Success ──> Return structured summary (model: Groq Cloud)
+   │             └── Failure ──> Log sanitized error (API key redacted) & proceed to step 3
+   └── Not Set ──> Proceed to step 3
+
+3. Deterministic Local NLP Heuristic Engine
+   └── Analyzes logged categories, total hours, reflection answers, and milestones locally.
+       Returns complete summary marked as:
+       "model_used": "Built-in Intelligent Summary Engine (Free / Local Fallback)"
+       ⚡ 100% submission reliability guaranteed — report submission NEVER fails due to AI downtime.
+```
+
+- **Credential Sanitization**: The helper `_sanitize_error(e, api_key)` automatically masks API keys before writing to application logs.
+- **Zero Hallucination Guardrails**: Prompts strictly instruct models to base summaries *only* on provided updates and answers.
+
+---
+
+## 📡 API Reference
+
+All application endpoints are versioned under `/api/v1`:
+
+| Method | Endpoint | Authentication | Required Role | Description |
+|:---|:---|:---|:---|:---|
+| `POST` | `/api/v1/auth/register` | Public | None | Registers a new employee account (always assigned `employee` role) |
+| `POST` | `/api/v1/auth/login` | Public | None | Authenticates credentials and returns a 7-day JWT Bearer token |
+| `GET` | `/api/v1/auth/me` | Bearer Token | Any | Returns profile information for the authenticated user |
+| `GET` | `/api/v1/auth/managers` | Public | None | Returns active managers for employee profile information |
+| `GET` | `/api/v1/auth/demo-users` | Public | None | Returns demo accounts (disabled with 404 in production) |
+| `GET` | `/api/v1/updates` | Bearer Token | Employee | Lists daily work updates for the logged-in employee |
+| `POST` | `/api/v1/updates` | Bearer Token | Employee | Creates a new daily work update |
+| `PUT` | `/api/v1/updates/{id}` | Bearer Token | Employee | Updates a work update (blocked if week's report is submitted) |
+| `DELETE` | `/api/v1/updates/{id}` | Bearer Token | Employee | Deletes a work update (blocked if week's report is submitted) |
+| `GET` | `/api/v1/questions` | Bearer Token | Any | Retrieves active weekly reflection questions |
+| `POST` | `/api/v1/questions` | Bearer Token | Manager | Creates a new organization reflection question |
+| `PUT` | `/api/v1/questions/{id}` | Bearer Token | Manager | Updates the prompt text of an existing question |
+| `DELETE` | `/api/v1/questions/{id}` | Bearer Token | Manager | Deletes a question from future reports |
+| `PATCH` | `/api/v1/questions/{id}/toggle` | Bearer Token | Manager | Toggles question status between active and inactive |
+| `GET` | `/api/v1/reports/current` | Bearer Token | Employee | Gets or creates weekly report draft for the current week |
+| `GET` | `/api/v1/reports/history` | Bearer Token | Employee | Lists past submitted reports for the logged-in employee |
+| `GET` | `/api/v1/reports/{id}` | Bearer Token | Employee | Retrieves details for an employee's report |
+| `POST` | `/api/v1/reports/draft` | Bearer Token | Employee | Saves draft reflection answers (cannot modify submitted reports) |
+| `POST` | `/api/v1/reports/{id}/submit` | Bearer Token | Employee | Submits report, validates 4 answers, acquires claim lock, generates AI summary |
+| `GET` | `/api/v1/reports/{id}/pdf` | Bearer Token | Employee / Mgr | Downloads official branded PDF report (restricted to owner or assigned manager) |
+| `GET` | `/api/v1/manager/employees` | Bearer Token | Manager | Lists direct reports assigned strictly to the requesting manager |
+| `GET` | `/api/v1/manager/reports` | Bearer Token | Manager | Lists weekly reports for assigned team members |
+| `GET` | `/api/v1/manager/reports/{id}` | Bearer Token | Manager | Detailed report inspection (access-isolated across managers) |
+| `GET` | `/api/v1/manager/unassigned-employees` | Bearer Token | Manager | Lists employees not currently assigned to any manager |
+| `POST` | `/api/v1/manager/assign-employee` | Bearer Token | Manager | Claims an unassigned employee into the manager's team |
+| `POST` | `/api/v1/manager/unassign-employee` | Bearer Token | Manager | Removes an employee from the manager's team |
+| `GET` | `/` | Public | None | Service information, version, and status probe |
+| `GET` | `/health` | Public | None | Live MongoDB connectivity health probe (200 healthy, 503 unavailable) |
+
+---
+
+## 💻 Local Development Setup
+
+### Prerequisites
+- **Python**: 3.10+ (tested on Python 3.11 and 3.14)
+- **Node.js**: v18+ (tested on Node v20/v22) and npm
+- **Database**: *(Optional)* Local MongoDB or MongoDB Atlas URI (if not configured, the backend automatically uses zero-config in-memory mock storage for local development)
+
+---
+
+### 1. Backend Setup
 
 ```bash
-# Navigate to backend directory
+# Navigate to backend directory from repository root
 cd backend
 
-# Create and activate virtual environment
+# Create Python virtual environment
 python -m venv venv
 
+# Activate virtual environment:
 # Windows PowerShell:
 .\venv\Scripts\Activate.ps1
-# macOS/Linux:
+# macOS / Linux:
 source venv/bin/activate
 
 # Install dependencies
@@ -126,127 +372,86 @@ pip install -r requirements.txt
 
 # Configure environment variables
 cp .env.example .env
-# Edit .env to add your GEMINI_API_KEY (optional: system has full NLP fallback if left blank)
-
-# Run backend comprehensive test suite
-pytest -c backend/pytest.ini backend/tests/test_comprehensive.py -v
-
-# Run legacy API test suite
-pytest -c backend/pytest.ini backend/tests/test_api.py -v
+# Edit .env to add your GEMINI_API_KEY (optional: local fallback activates if left blank)
 
 # Start FastAPI development server
 uvicorn app.main:app --reload --port 8000
 ```
-
 FastAPI will start at `http://127.0.0.1:8000`.  
 Explore interactive OpenAPI docs at `http://127.0.0.1:8000/docs`.
 
 ---
 
-### 3. Frontend Setup
+### 2. Frontend Setup
 
 ```bash
-# In a new terminal, navigate to frontend directory
+# In a new terminal, navigate to frontend directory from repository root
 cd frontend
 
 # Install npm dependencies
 npm install
 
-# Run frontend test suite
-npm test
-
 # Start Vite development server
 npm run dev
 ```
-
 Open your browser at `http://localhost:5173`.
 
 ---
 
-## 📡 API Overview
+## 🌐 Cloud Deployment Guide (Atlas + Render + Vercel)
 
-| Method | Endpoint | Access | Description |
-| :--- | :--- | :--- | :--- |
-| `POST` | `/api/v1/auth/login` | Public | Authenticates credentials and returns JWT Bearer token |
-| `GET` | `/api/v1/auth/me` | Authenticated | Retrieves current logged-in profile & role |
-| `GET` | `/api/v1/auth/demo-users`| Public | Returns pre-seeded demo user accounts |
-| `GET` | `/api/v1/questions` | Authenticated | Returns the 4 active weekly questions |
-| `POST` | `/api/v1/questions` | Manager | Creates a new configurable weekly question (Bonus) |
-| `GET` | `/api/v1/updates` | Employee | Lists employee's daily work updates (strict ownership) |
-| `POST` | `/api/v1/updates` | Employee | Logs a new daily work update |
-| `PUT` | `/api/v1/updates/{id}` | Employee | Edits an existing work update |
-| `DELETE`| `/api/v1/updates/{id}`| Employee | Deletes a work update |
-| `GET` | `/api/v1/reports/current` | Employee | Gets or creates current week's report draft |
-| `POST` | `/api/v1/reports/draft` | Employee | Saves report draft answers (only if not submitted) |
-| `POST` | `/api/v1/reports/{id}/submit` | Employee | Submits report, generates AI summary, locks report |
-| `GET` | `/api/v1/reports/{id}/pdf` | Employee / Mgr | Downloads official PDF version of the report |
-| `GET` | `/api/v1/manager/employees` | Manager | Lists employees assigned to the current manager |
-| `GET` | `/api/v1/manager/reports` | Manager | Lists submitted reports for assigned employees |
-| `GET` | `/api/v1/manager/reports/{id}`| Manager | Inspects full report (updates + answers + AI summary) |
-
----
-
-## 🤖 AI Model Selection & Resilience Note
-
-- **Primary Model**: **Google Gemini 3.5 Flash-Lite** (`gemini-3.5-flash-lite`, configurable via `GEMINI_MODEL`).
-  - *Why selected*: Google Gemini 3.5 Flash-Lite is officially supported on the free tier according to Google's official Gemini API documentation, providing high speed, structured JSON generation, and a generous context window. Predecessor models (`gemini-1.5-flash` and `gemini-2.5-flash`) have been deprecated or phased out for new projects.
-  - *Fallback*: Secondary fallback to Groq (`openai/gpt-oss-120b`) free tier.
-- **Fail-Safe Heuristic Engine**: If no API key is supplied or external provider rate limits/timeouts occur, the built-in deterministic NLP heuristic engine parses work categories, logged hours, completed milestones, and blockers to synthesize the executive summary and manager recommendation. Output is strictly marked with `model_used: "Deterministic Heuristic Fallback (Local)"`. Never hallucinates or invents deliverables if updates are absent.
-- **Retry Mechanism**: The system automatically executes exponential retries on transient connection timeouts.
-- **Security & Guardrails**: The API key is sent via standard HTTP header `x-goog-api-key` (never exposed in query parameters or logged); the prompt explicitly instructs the LLM not to invent tasks or embellish outside the provided updates. Error logs automatically redact sensitive credentials.
-
----
-
-## 🌐 Production Cloud Deployment Guide
-
-> **Note on Email & Notifications**: In accordance with the assessment requirements, email delivery and SMTP reminder scheduler functionality are intentionally **not included**. The application focuses strictly on core work tracking, weekly reporting, reflection answers, AI summarization, submitted report immutability, PDF export, and manager accountability oversight.
+> **Scope Notice**: Email delivery and SMTP deadline reminder notifications are intentionally **not included**. The application focuses on daily tracking, reflection answers, atomic weekly report submission, AI summarization, PDF export, and manager accountability oversight.
 
 ### 1. MongoDB Atlas Setup
 1. Create a free shared cluster (M0) on [MongoDB Atlas](https://www.mongodb.com/atlas).
-2. **Database Access**: Create a database user (e.g. `reporting_user`) with `Read and write to any database` privileges. Ensure password characters that are URI-reserved (like `@`, `:`, `/`) are URL-encoded.
-3. **Network Access**: Add IP address `0.0.0.0/0` (Allow Access from Anywhere) to allow inbound connections from Render's cloud servers.
-4. Copy the connection string (format: `mongodb+srv://reporting_user:<PASSWORD>@cluster0.mongodb.net/employee_reporting_db?retryWrites=true&w=majority`).
+2. **Database Access**: Create a database user (e.g. `reporting_user`) with `Read and write to any database` privileges. Ensure any reserved characters in the password (`@`, `:`, `/`) are URL-encoded.
+3. **Network Access**: Add IP `0.0.0.0/0` (Allow Access from Anywhere) to permit connections from Render's cloud instances.
+4. Copy your connection string:
+   `mongodb+srv://reporting_user:<PASSWORD>@cluster0.mongodb.net/employee_reporting_db?retryWrites=true&w=majority`
 
 ### 2. Backend Deployment on Render
-1. Log in to [Render](https://render.com/) and create a new **Web Service** connected to this repository (or use the included `render.yaml` Blueprint).
-2. Configure settings:
-   - **Root Directory**: `backend`
-   - **Runtime**: `Python 3`
-   - **Build Command**: `pip install -r requirements.txt`
-   - **Start Command**: `uvicorn app.main:app --host 0.0.0.0 --port $PORT`
-   - **Health Check Path**: `/health`
-3. Set Environment Variables in Render:
-   - `ENVIRONMENT`: `production` *(Enforces strict security, disables demo-users endpoint, and mandates MongoDB connectivity)*
-   - `MONGODB_URI`: *Your MongoDB Atlas connection URI*
-   - `DATABASE_NAME`: `employee_reporting_db`
-   - `JWT_SECRET_KEY`: *A strong, secure secret of at least 32 characters*
-   - `ALGORITHM`: `HS256`
-   - `ACCESS_TOKEN_EXPIRE_MINUTES`: `10080`
-   - `BACKEND_CORS_ORIGINS`: `["https://your-app.vercel.app"]` *(Exact Vercel frontend URL; single URL, comma-separated, or JSON array)*
-   - `GEMINI_API_KEY`: *(Optional) Your Google AI Studio API key*
-   - `GEMINI_MODEL`: `gemini-3.5-flash-lite`
-   - `GROQ_API_KEY`: *(Optional) Your Groq API key for secondary fallback*
-   - `SEED_DEMO_ACCOUNTS`: `"true"` for initial deployment to seed evaluation accounts. *After initial boot, toggle to `"false"` in Render Environment Variables to permanently disable demo seeding on subsequent service restarts.*
-   - `ENABLE_DEMO_USERS`: `"false"` *(Disables public demo credentials endpoint in production)*
-4. Click **Deploy**. Note your backend URL (e.g., `https://employee-reporting-api.onrender.com`).
+Deploy using the canonical root `render.yaml` Blueprint or create a manual Web Service:
+
+- **Root Directory**: `backend`
+- **Runtime**: `Python 3`
+- **Build Command**: `pip install -r requirements.txt`
+- **Start Command**: `uvicorn app.main:app --host 0.0.0.0 --port $PORT`
+- **Health Check Path**: `/health`
+
+**Environment Variables in Render**:
+| Variable | Value | Description |
+|---|---|---|
+| `ENVIRONMENT` | `production` | Enforces production security, blocks mock fallback |
+| `MONGODB_URI` | *Your Atlas Connection URI* | Live MongoDB connection string |
+| `DATABASE_NAME` | `employee_reporting_db` | MongoDB database name |
+| `JWT_SECRET_KEY` | *Minimum 32-character secret* | Secure token signing key |
+| `ALGORITHM` | `HS256` | JWT signing algorithm |
+| `ACCESS_TOKEN_EXPIRE_MINUTES` | `10080` | Token lifetime (7 days) |
+| `BACKEND_CORS_ORIGINS` | `["https://your-app.vercel.app"]` | Your exact Vercel frontend URL (string, comma-separated, or JSON) |
+| `SEED_DEMO_ACCOUNTS` | `true` | Seeds initial assessment accounts. Set to `false` after initial boot. |
+| `ENABLE_DEMO_USERS` | `false` | Disables public `/demo-users` discovery endpoint |
+| `GEMINI_API_KEY` | *(Optional)* Google AI Studio key | Primary LLM provider key |
+| `GEMINI_MODEL` | `gemini-3.5-flash-lite` | Primary LLM model identifier |
+| `GROQ_API_KEY` | *(Optional)* Groq API key | Secondary fallback LLM key |
 
 ### 3. Frontend Deployment on Vercel
-1. Log in to [Vercel](https://vercel.com/) and create a new project importing this repository.
-2. Configure settings:
+1. Log in to [Vercel](https://vercel.com/) and click **Add New → Project**.
+2. Import this repository.
+3. Configure settings:
    - **Framework Preset**: `Vite`
    - **Root Directory**: `frontend`
    - **Build Command**: `npm run build`
    - **Output Directory**: `dist`
-3. Environment Variables:
-   - `VITE_API_BASE_URL`: `https://employee-reporting-api.onrender.com/api/v1` *(Your Render backend URL with /api/v1)*
-4. Click **Deploy**. Vercel will deploy your application with full SPA client-side routing powered by `frontend/vercel.json`.
+4. Set Environment Variables:
+   - `VITE_API_BASE_URL`: `https://your-backend-app.onrender.com/api/v1` *(Your Render URL + /api/v1)*
+5. Click **Deploy**. Vercel will build the frontend with full SPA client-side routing powered by `frontend/vercel.json`.
 
-### 4. Health Check & Connectivity Verification
-Verify your deployment by querying the health endpoint:
+### 4. Health Check Probe
+Query your deployed backend health endpoint:
 ```bash
-curl https://employee-reporting-api.onrender.com/health
+curl https://your-backend-app.onrender.com/health
 ```
-Expected output:
+Response:
 ```json
 {
   "status": "healthy",
@@ -255,25 +460,49 @@ Expected output:
   "database": "mongodb_connected"
 }
 ```
-If MongoDB is unreachable, the endpoint returns HTTP `503 Service Unavailable` with details, preventing traffic from reaching an unbacked API.
+If MongoDB Atlas is unreachable, the endpoint returns HTTP `503 Service Unavailable`, preventing traffic from reaching an unbacked API.
 
-### 5. Troubleshooting MongoDB Connection Failures
-- **ServerSelectionTimeoutError / Connection Timeout**: Ensure Atlas Network Access includes `0.0.0.0/0`.
-- **Authentication Failed**: Verify database username and password in Atlas Database Access. If the password has special characters (`@`, `:`, `#`), URL-encode them.
-- **Production Startup Error**: In production, falling back to an in-memory mock database is prohibited for safety. Ensure `MONGODB_URI` is correctly provided.
+---
 
-### 6. Testing Core Workflow with Evaluation Accounts
-Log in at your deployed Vercel URL using the pre-seeded evaluation accounts:
-1. **Manager Flow**:
-   - Log in as Sarah Chen (`manager@company.com` / `Manager@123`).
-   - View assigned team members (Alex Rivera and Priya Patel) on the Manager Dashboard.
-   - Inspect team weekly report submissions and AI-synthesized executive summaries.
-   - Export official branded executive PDFs.
-2. **Employee Flow**:
-   - Log in as Alex Rivera (`alex@company.com` / `Employee@123`).
-   - Create, edit, and delete daily work updates with hours spent and category tags.
-   - Review current weekly report draft with updates automatically linked.
-   - Fill in reflection questions and submit the report.
-   - Verify report locks into immutable submitted mode with generated AI summary and PDF download.
+## 🧪 Testing & Verification
 
-For additional architectural details and edge cases, refer to [`PLATFORM_OPERATIONS.md`](./PLATFORM_OPERATIONS.md).
+### Running Backend Tests
+
+#### Option A: From Repository Root
+```bash
+# Comprehensive regression test suite (53 tests)
+pytest -c backend/pytest.ini backend/tests/ -v
+
+# Targeted API regression suite
+pytest -c backend/pytest.ini backend/tests/test_api.py -v
+```
+
+#### Option B: From Inside `backend/` Directory
+```bash
+cd backend
+# Run test suite
+pytest -c pytest.ini tests/ -v
+```
+
+#### Option C: Standalone E2E Verification Runner
+```bash
+# Runs full end-to-end integration test flow against live FastAPI instance
+python backend/test_runner.py
+```
+
+### Running Frontend Tests & Production Build
+```bash
+cd frontend
+
+# Run unit tests and RBAC validation suite
+npm test
+
+# Run production Vite build
+npm run build
+```
+
+---
+
+## 📄 License & Attribution
+
+This project is submitted as an evaluation deliverable for the Technical Assessment. Designed and implemented with clean architecture, zero-hallucination AI integration, and robust concurrency guarantees.

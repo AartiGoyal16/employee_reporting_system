@@ -25,7 +25,7 @@ async def test_live_gemini():
 
     # Strictly mask the key for display
     masked_key = f"{api_key[:6]}...[REDACTED]...{api_key[-4:]}" if len(api_key) > 12 else "[REDACTED]"
-    model = os.getenv("GEMINI_MODEL") or getattr(settings, "GEMINI_MODEL", "gemini-2.5-flash")
+    model = os.getenv("GEMINI_MODEL") or getattr(settings, "GEMINI_MODEL", "gemini-3.5-flash-lite")
 
     print("=================================================================")
     print("           Google Gemini API Live Integration Check              ")
