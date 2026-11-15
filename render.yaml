@@ -22,6 +22,6 @@ services:
       - key: GROQ_API_KEY
         sync: false
       - key: BACKEND_CORS_ORIGINS
-        value: '["https://employee-reporting-system.vercel.app"]'
+        sync: false
       - key: SEED_DEMO_ACCOUNTS
         value: "true"

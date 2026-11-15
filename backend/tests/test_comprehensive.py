@@ -534,6 +534,67 @@ async def test_health_check_endpoint():
         data = r.json()
         assert data["status"] == "healthy"
 
+@pytest.mark.anyio
+async def test_production_database_fails_fast_on_unreachable_atlas():
+    """Verifies that production startup fails immediately with RuntimeError if Atlas is unreachable, never falling back to mock."""
+    from app.database import DatabaseManager
+    mgr = DatabaseManager()
+    orig_env = settings.ENVIRONMENT
+    orig_uri = settings.MONGODB_URI
+    try:
+        settings.ENVIRONMENT = "production"
+        settings.MONGODB_URI = "mongodb://nonexistent.atlas.invalid:27017"
+        with pytest.raises(RuntimeError) as exc_info:
+            await mgr.connect_to_database()
+        assert "Production startup failed" in str(exc_info.value)
+        assert mgr.is_mock is True  # Didn't switch to active mock connection
+        # Verify ping_database returns False in production if mock
+        is_ping = await mgr.ping_database()
+        assert is_ping is False
+    finally:
+        settings.ENVIRONMENT = orig_env
+        settings.MONGODB_URI = orig_uri
+
+@pytest.mark.anyio
+async def test_production_mock_uri_strictly_prohibited():
+    """Verifies that MONGODB_URI='mock' is strictly prohibited in production."""
+    from app.database import DatabaseManager
+    mgr = DatabaseManager()
+    orig_env = settings.ENVIRONMENT
+    orig_uri = settings.MONGODB_URI
+    try:
+        settings.ENVIRONMENT = "production"
+        settings.MONGODB_URI = "mock"
+        with pytest.raises(RuntimeError) as exc_info:
+            await mgr.connect_to_database()
+        assert "Mock database is strictly forbidden in production" in str(exc_info.value) or "falling back to mock database is prohibited" in str(exc_info.value)
+    finally:
+        settings.ENVIRONMENT = orig_env
+        settings.MONGODB_URI = orig_uri
+
+@pytest.mark.anyio
+async def test_demo_seeding_idempotent_and_respects_toggle():
+    """Verifies that SEED_DEMO_ACCOUNTS=False disables seeding, and repeated runs never duplicate accounts."""
+    db = get_database()
+    orig_seed = settings.SEED_DEMO_ACCOUNTS
+    try:
+        # 1. When SEED_DEMO_ACCOUNTS is False, no demo seeding occurs
+        settings.SEED_DEMO_ACCOUNTS = False
+        await seed_database(db)
+
+        # 2. When True, run twice - must be strictly idempotent
+        settings.SEED_DEMO_ACCOUNTS = True
+        await seed_database(db)
+        count_sarah = await db.users.count_documents({"email": "manager@company.com"})
+        assert count_sarah == 1
+
+        # Second run on same database:
+        await seed_database(db)
+        count_sarah_2 = await db.users.count_documents({"email": "manager@company.com"})
+        assert count_sarah_2 == 1
+    finally:
+        settings.SEED_DEMO_ACCOUNTS = orig_seed
+
 # ============================================================================
 # 7. FINAL DEFECT FIXES VERIFICATION TESTS
 # ============================================================================

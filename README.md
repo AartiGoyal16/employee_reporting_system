@@ -226,7 +226,7 @@ Open your browser at `http://localhost:5173`.
    - `GEMINI_API_KEY`: *(Optional) Your Google AI Studio API key*
    - `GEMINI_MODEL`: `gemini-3.5-flash-lite`
    - `GROQ_API_KEY`: *(Optional) Your Groq API key for secondary fallback*
-   - `SEED_DEMO_ACCOUNTS`: `"true"` for initial deployment to seed evaluation accounts, then set to `"false"`
+   - `SEED_DEMO_ACCOUNTS`: `"true"` for initial deployment to seed evaluation accounts. *After initial boot, toggle to `"false"` in Render Environment Variables to permanently disable demo seeding on subsequent service restarts.*
    - `ENABLE_DEMO_USERS`: `"false"` *(Disables public demo credentials endpoint in production)*
 4. Click **Deploy**. Note your backend URL (e.g., `https://employee-reporting-api.onrender.com`).
 

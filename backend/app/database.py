@@ -143,7 +143,13 @@ class DatabaseManager:
     async def connect_to_database(self):
         import os
         is_production = settings.ENVIRONMENT.lower() == "production"
-        is_explicit_test = os.getenv("TESTING") == "1" or settings.MONGODB_URI.lower() == "mock" or settings.ENVIRONMENT.lower() == "test"
+        is_explicit_test = (os.getenv("TESTING") == "1" or settings.MONGODB_URI.lower() == "mock" or settings.ENVIRONMENT.lower() == "test") and not is_production
+
+        if is_production and (not settings.MONGODB_URI or settings.MONGODB_URI.lower() in ["mock", "none", ""]):
+            raise RuntimeError(
+                "Production startup failed: MONGODB_URI must be provided with a valid MongoDB Atlas connection URI. "
+                "In production, falling back to mock database is prohibited."
+            )
 
         if is_explicit_test:
             logger.info("TESTING / mock mode active: using in-memory mock MongoDB.")

@@ -215,9 +215,9 @@ MongoDB is used as the document store. Documents are structured to support fast,
    - `GEMINI_MODEL`: `gemini-3.5-flash-lite`
    - `GROQ_API_KEY`: *(Optional) Your Groq API key for secondary fallback*
    - `GROQ_MODEL`: `openai/gpt-oss-120b`
-   - `BACKEND_CORS_ORIGINS`: `["https://your-frontend-app.vercel.app"]` *(IMPORTANT: Must be your exact Vercel frontend URL. Wildcards are strictly blocked in production)*
+   - `BACKEND_CORS_ORIGINS`: `["https://your-frontend-app.vercel.app"]` *(IMPORTANT: Must be your exact Vercel frontend URL. Accepts a single string, comma-separated strings, or JSON array. Wildcards are strictly blocked in production)*
    - `ENABLE_DEMO_USERS`: `false` *(Disables public demo credentials endpoint)*
-   - `SEED_DEMO_ACCOUNTS`: `true` *(Enables seeding synthetic assessment evaluation accounts on fresh database)*
+   - `SEED_DEMO_ACCOUNTS`: `true` *(Initial setup: seeds assessment evaluation accounts on fresh database. After initial setup, change to `false` in Render Environment Variables to permanently disable re-seeding checks on restart)*
 5. Click **Create Web Service**.
 6. Note the deployed Render URL: `https://your-backend-app.onrender.com`.
 
