@@ -6,6 +6,8 @@ from app.database import get_database
 from app.models.update import WorkUpdateCreate, WorkUpdateEdit, WorkUpdateResponse
 from app.auth.dependencies import require_employee
 
+import uuid
+
 router = APIRouter(prefix="/updates", tags=["Work Updates"])
 
 def get_week_boundaries_for_date(date_str: str) -> tuple[str, str]:
@@ -23,19 +25,22 @@ async def acquire_draft_report_lease(
     week_end: str,
     add_update_id: Optional[str] = None,
     remove_update_id: Optional[str] = None
-) -> tuple[bool, str]:
+) -> tuple[bool, str, Optional[str]]:
     """
-    Atomic coordination strategy:
+    Ownership-aware atomic coordination strategy:
     Acquires an atomic mutation lease on the weekly report document guaranteeing it is in 'draft' status.
-    If the report is currently 'submitting' or 'submitted', the atomic update matches 0 documents.
+    Generates a unique lease_token recorded in active_leases.
+    Returns (allowed, status, lease_token).
     """
+    lease_token = str(uuid.uuid4())
     now = datetime.utcnow()
     update_ops = {
-        "$inc": {"mutation_sequence": 1, "active_mutations": 1},
-        "$set": {"updated_at": now, "mutation_locked_at": now}
+        "$inc": {"mutation_sequence": 1},
+        "$addToSet": {"active_leases": lease_token},
+        "$set": {"updated_at": now}
     }
     if add_update_id:
-        update_ops["$addToSet"] = {"work_update_ids": add_update_id}
+        update_ops["$addToSet"]["work_update_ids"] = add_update_id
     if remove_update_id:
         update_ops["$pull"] = {"work_update_ids": remove_update_id}
 
@@ -51,7 +56,7 @@ async def acquire_draft_report_lease(
         return_document=True
     )
     if lease:
-        return True, "draft"
+        return True, "draft", lease_token
 
     # 2. Check if report already exists in non-draft status
     existing = await db.weekly_reports.find_one({
@@ -60,7 +65,7 @@ async def acquire_draft_report_lease(
         "week_end_date": week_end
     })
     if existing:
-        return False, existing.get("status", "locked")
+        return False, existing.get("status", "locked"), None
 
     # 3. Report doc does not exist yet -> create draft with lease
     manager_name = None
@@ -90,12 +95,11 @@ async def acquire_draft_report_lease(
             "submitted_at": None,
             "ai_summary": None,
             "mutation_sequence": 1,
-            "active_mutations": 1,
-            "mutation_locked_at": now,
+            "active_leases": [lease_token],
             "created_at": now,
             "updated_at": now
         })
-        return True, "draft"
+        return True, "draft", lease_token
     except Exception:
         # Concurrent insert race: re-check
         existing = await db.weekly_reports.find_one({
@@ -104,7 +108,7 @@ async def acquire_draft_report_lease(
             "week_end_date": week_end
         })
         if existing and existing.get("status") in ["submitting", "submitted"]:
-            return False, existing.get("status")
+            return False, existing.get("status"), None
         lease = await db.weekly_reports.find_one_and_update(
             {
                 "user_id": user_id,
@@ -115,25 +119,33 @@ async def acquire_draft_report_lease(
             update_ops,
             return_document=True
         )
-        return (True, "draft") if lease else (False, "locked")
+        return (True, "draft", lease_token) if lease else (False, "locked", None)
 
 async def release_draft_report_lease(
     db,
     user_id: str,
     week_start: str,
     week_end: str,
+    lease_token: Optional[str] = None,
     rollback_add_id: Optional[str] = None,
     rollback_remove_id: Optional[str] = None
 ):
     """
-    Releases mutation lock on the weekly report document and cleans up if mutation failed.
+    Releases this specific operation's lease token and safely rolls back changes if requested.
+    Only releases if the lease_token is present in active_leases on the draft report.
+    Never modifies a submitted report or another operation's state.
     """
+    if not lease_token:
+        return
+
+    pull_ops = {"active_leases": lease_token}
+    if rollback_add_id:
+        pull_ops["work_update_ids"] = rollback_add_id
+
     ops = {
-        "$inc": {"active_mutations": -1},
+        "$pull": pull_ops,
         "$set": {"updated_at": datetime.utcnow()}
     }
-    if rollback_add_id:
-        ops["$pull"] = {"work_update_ids": rollback_add_id}
     if rollback_remove_id:
         ops["$addToSet"] = {"work_update_ids": rollback_remove_id}
 
@@ -142,7 +154,8 @@ async def release_draft_report_lease(
             "user_id": user_id,
             "week_start_date": week_start,
             "week_end_date": week_end,
-            "status": "draft"
+            "status": "draft",
+            "active_leases": lease_token
         },
         ops
     )
@@ -197,7 +210,7 @@ async def create_work_update(
     now = datetime.utcnow()
 
     # Atomically acquire lease on the weekly report guaranteeing draft status
-    allowed, report_status = await acquire_draft_report_lease(
+    allowed, report_status, lease_token = await acquire_draft_report_lease(
         db, current_user["id"], current_user, week_start, week_end, add_update_id=str(new_oid)
     )
     if not allowed:
@@ -217,15 +230,18 @@ async def create_work_update(
         "created_at": now,
         "updated_at": now
     }
+    mutation_succeeded = False
     try:
         await db.work_updates.insert_one(doc)
+        mutation_succeeded = True
     except Exception as exc:
         await release_draft_report_lease(
-            db, current_user["id"], week_start, week_end, rollback_add_id=str(new_oid)
+            db, current_user["id"], week_start, week_end, lease_token=lease_token, rollback_add_id=str(new_oid)
         )
         raise exc
     finally:
-        await release_draft_report_lease(db, current_user["id"], week_start, week_end)
+        if mutation_succeeded:
+            await release_draft_report_lease(db, current_user["id"], week_start, week_end, lease_token=lease_token)
 
     return WorkUpdateResponse(
         id=str(doc["_id"]),
@@ -290,12 +306,16 @@ async def edit_work_update(
     if doc["user_id"] != current_user["id"]:
         raise HTTPException(status_code=403, detail="Forbidden: You can only edit your own work updates")
 
+    lease_new = None
+    lease_old = None
+    mutation_succeeded = False
+
     if update_data.date and update_data.date != doc["date"]:
         old_start, old_end = get_week_boundaries_for_date(doc["date"])
         new_start, new_end = get_week_boundaries_for_date(update_data.date)
 
         # 1. Lease target week first
-        allowed_new, st_new = await acquire_draft_report_lease(
+        allowed_new, st_new, lease_new = await acquire_draft_report_lease(
             db, current_user["id"], current_user, new_start, new_end, add_update_id=str(oid)
         )
         if not allowed_new:
@@ -305,14 +325,13 @@ async def edit_work_update(
             )
 
         # 2. Lease source week
-        allowed_old, st_old = await acquire_draft_report_lease(
+        allowed_old, st_old, lease_old = await acquire_draft_report_lease(
             db, current_user["id"], current_user, old_start, old_end, remove_update_id=str(oid)
         )
         if not allowed_old:
-            # Revert target week addition
-            await db.weekly_reports.update_one(
-                {"user_id": current_user["id"], "week_start_date": new_start},
-                {"$pull": {"work_update_ids": str(oid)}}
+            # Revert target week lease and addition cleanly
+            await release_draft_report_lease(
+                db, current_user["id"], new_start, new_end, lease_token=lease_new, rollback_add_id=str(oid)
             )
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -320,7 +339,7 @@ async def edit_work_update(
             )
     else:
         week_start, week_end = get_week_boundaries_for_date(doc["date"])
-        allowed, report_status = await acquire_draft_report_lease(
+        allowed, report_status, lease_new = await acquire_draft_report_lease(
             db, current_user["id"], current_user, week_start, week_end
         )
         if not allowed:
@@ -334,12 +353,27 @@ async def edit_work_update(
 
     try:
         await db.work_updates.update_one({"_id": oid}, {"$set": set_fields})
-    finally:
+        mutation_succeeded = True
+    except Exception as exc:
         if update_data.date and update_data.date != doc["date"]:
-            await release_draft_report_lease(db, current_user["id"], new_start, new_end)
-            await release_draft_report_lease(db, current_user["id"], old_start, old_end)
+            await release_draft_report_lease(
+                db, current_user["id"], new_start, new_end, lease_token=lease_new, rollback_add_id=str(oid)
+            )
+            await release_draft_report_lease(
+                db, current_user["id"], old_start, old_end, lease_token=lease_old, rollback_remove_id=str(oid)
+            )
         else:
-            await release_draft_report_lease(db, current_user["id"], week_start, week_end)
+            await release_draft_report_lease(
+                db, current_user["id"], week_start, week_end, lease_token=lease_new
+            )
+        raise exc
+    finally:
+        if mutation_succeeded:
+            if update_data.date and update_data.date != doc["date"]:
+                await release_draft_report_lease(db, current_user["id"], new_start, new_end, lease_token=lease_new)
+                await release_draft_report_lease(db, current_user["id"], old_start, old_end, lease_token=lease_old)
+            else:
+                await release_draft_report_lease(db, current_user["id"], week_start, week_end, lease_token=lease_new)
 
     updated_doc = await db.work_updates.find_one({"_id": oid})
 
@@ -375,7 +409,7 @@ async def delete_work_update(
         raise HTTPException(status_code=403, detail="Forbidden: You can only delete your own work updates")
 
     week_start, week_end = get_week_boundaries_for_date(doc["date"])
-    allowed, report_status = await acquire_draft_report_lease(
+    allowed, report_status, lease_token = await acquire_draft_report_lease(
         db, current_user["id"], current_user, week_start, week_end, remove_update_id=str(oid)
     )
     if not allowed:
@@ -384,14 +418,17 @@ async def delete_work_update(
             detail=f"Cannot delete work update: the weekly report for {week_start} to {week_end} is {report_status} and cannot be modified."
         )
 
+    mutation_succeeded = False
     try:
         await db.work_updates.delete_one({"_id": oid})
+        mutation_succeeded = True
     except Exception as exc:
         await release_draft_report_lease(
-            db, current_user["id"], week_start, week_end, rollback_remove_id=str(oid)
+            db, current_user["id"], week_start, week_end, lease_token=lease_token, rollback_remove_id=str(oid)
         )
         raise exc
     finally:
-        await release_draft_report_lease(db, current_user["id"], week_start, week_end)
+        if mutation_succeeded:
+            await release_draft_report_lease(db, current_user["id"], week_start, week_end, lease_token=lease_token)
 
     return None

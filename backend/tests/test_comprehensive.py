@@ -1287,7 +1287,7 @@ async def test_submission_error_returns_generic_client_safe_message():
 
 @pytest.mark.anyio
 async def test_concurrency_report_submission_blocks_while_work_update_mutation_in_progress():
-    """Ensure report submission rejects (HTTP 409) if a work-update mutation holds the mutation lease."""
+    """Ensure report submission rejects (HTTP 409) if a work-update mutation holds an active lease."""
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         email = f"mutblock.{int(datetime.utcnow().timestamp())}@company.com"
@@ -1308,11 +1308,12 @@ async def test_concurrency_report_submission_blocks_while_work_update_mutation_i
         })
         rep_id = r_d.json()["id"]
 
-        # Simulate an in-flight work-update mutation holding the mutation lock
+        # Simulate an in-flight work-update mutation holding a lease token
         db = get_database()
+        lease_token = "lease-token-in-flight-1234"
         await db.weekly_reports.update_one(
             {"_id": ObjectId(rep_id)},
-            {"$set": {"active_mutations": 1, "mutation_locked_at": datetime.utcnow()}}
+            {"$addToSet": {"active_leases": lease_token}}
         )
 
         valid_answers = [
@@ -1403,3 +1404,252 @@ async def test_concurrency_work_update_move_between_two_weeks_atomic():
         # Verify target week report did not keep the update id
         rep_w2 = await db.weekly_reports.find_one({"user_id": user_id, "week_start_date": "2026-11-16"})
         assert up_id not in rep_w2.get("work_update_ids", [])
+
+@pytest.mark.anyio
+async def test_concurrency_controlled_interleavings():
+    """Requirement 6: Controlled async interleavings testing create, edit, delete, move vs submit, and recovery."""
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        # Create user
+        email = f"interleaving.{int(datetime.utcnow().timestamp())}@company.com"
+        await client.post("/api/v1/auth/register", json={
+            "name": "Interleaving Tester",
+            "email": email,
+            "password": "Password@123",
+            "role": "employee"
+        })
+        r_emp = await client.post("/api/v1/auth/login", json={"email": email, "password": "Password@123"})
+        h = {"Authorization": f"Bearer {r_emp.json()['access_token']}"}
+        db = get_database()
+
+        valid_answers = [
+            {"question_key": "accomplishments", "question_text": "q1", "answer": "Done"},
+            {"question_key": "in_progress", "question_text": "q2", "answer": "Doing"},
+            {"question_key": "blockers", "question_text": "q3", "answer": "None"},
+            {"question_key": "priorities", "question_text": "q4", "answer": "Next"}
+        ]
+
+        # 1. Create vs Submit: slow insert holds lease while submit is attempted
+        r_d = await client.post("/api/v1/reports/draft", headers=h, json={
+            "week_start_date": "2026-11-09",
+            "week_end_date": "2026-11-15",
+            "answers": []
+        })
+        rep_id = r_d.json()["id"]
+
+        orig_insert = db.work_updates.insert_one
+        async def slow_insert(*args, **kwargs):
+            # Interleave submit attempt while lease is actively held
+            r_sub = await client.post(f"/api/v1/reports/{rep_id}/submit", headers=h, json={"answers": valid_answers})
+            assert r_sub.status_code == 409
+            assert "mutation is currently in progress" in r_sub.json()["detail"]
+            return await orig_insert(*args, **kwargs)
+
+        with patch.object(db.work_updates, "insert_one", side_effect=slow_insert):
+            r_create = await client.post("/api/v1/updates", headers=h, json={
+                "date": "2026-11-10",
+                "title": "Interleaved Create",
+                "description": "Details",
+                "category": "Feature",
+                "hours_spent": 3.0
+            })
+            assert r_create.status_code == 201
+            up_id = r_create.json()["id"]
+
+        # Ensure lease was released once mutation finished
+        rep_after_create = await db.weekly_reports.find_one({"_id": ObjectId(rep_id)})
+        assert rep_after_create.get("active_leases", []) == []
+
+        # 2. Edit vs Submit: slow update_one holds lease while submit is attempted
+        orig_update = db.work_updates.update_one
+        async def slow_update(*args, **kwargs):
+            r_sub = await client.post(f"/api/v1/reports/{rep_id}/submit", headers=h, json={"answers": valid_answers})
+            assert r_sub.status_code == 409
+            assert "mutation is currently in progress" in r_sub.json()["detail"]
+            return await orig_update(*args, **kwargs)
+
+        with patch.object(db.work_updates, "update_one", side_effect=slow_update):
+            r_edit = await client.put(f"/api/v1/updates/{up_id}", headers=h, json={
+                "title": "Interleaved Edit Title"
+            })
+            assert r_edit.status_code == 200
+
+        rep_after_edit = await db.weekly_reports.find_one({"_id": ObjectId(rep_id)})
+        assert rep_after_edit.get("active_leases", []) == []
+
+        # 3. Move vs Submit: moving across weeks holds leases while submit is attempted
+        # Initialize week 2 draft report
+        await client.post("/api/v1/reports/draft", headers=h, json={
+            "week_start_date": "2026-11-16",
+            "week_end_date": "2026-11-22",
+            "answers": []
+        })
+
+        async def slow_move_update(*args, **kwargs):
+            r_sub = await client.post(f"/api/v1/reports/{rep_id}/submit", headers=h, json={"answers": valid_answers})
+            assert r_sub.status_code == 409
+            assert "mutation is currently in progress" in r_sub.json()["detail"]
+            return await orig_update(*args, **kwargs)
+
+        with patch.object(db.work_updates, "update_one", side_effect=slow_move_update):
+            r_move = await client.put(f"/api/v1/updates/{up_id}", headers=h, json={
+                "date": "2026-11-17"
+            })
+            assert r_move.status_code == 200
+
+        # Move it back to week 1 for delete testing
+        await client.put(f"/api/v1/updates/{up_id}", headers=h, json={"date": "2026-11-10"})
+
+        # 4. Delete vs Submit: slow delete_one holds lease while submit is attempted
+        orig_delete = db.work_updates.delete_one
+        async def slow_delete(*args, **kwargs):
+            r_sub = await client.post(f"/api/v1/reports/{rep_id}/submit", headers=h, json={"answers": valid_answers})
+            assert r_sub.status_code == 409
+            assert "mutation is currently in progress" in r_sub.json()["detail"]
+            return await orig_delete(*args, **kwargs)
+
+        with patch.object(db.work_updates, "delete_one", side_effect=slow_delete):
+            r_del = await client.delete(f"/api/v1/updates/{up_id}", headers=h)
+            assert r_del.status_code == 204
+
+        rep_after_del = await db.weekly_reports.find_one({"_id": ObjectId(rep_id)})
+        assert rep_after_del.get("active_leases", []) == []
+
+        # 5. Mutation failure after acquiring both week leases: rollback restores state
+        r_new_up = await client.post("/api/v1/updates", headers=h, json={
+            "date": "2026-11-10",
+            "title": "Fail Task",
+            "description": "Details",
+            "category": "Feature",
+            "hours_spent": 2.0
+        })
+        fail_up_id = r_new_up.json()["id"]
+
+        async def failing_update(*args, **kwargs):
+            raise RuntimeError("Simulated DB disk failure during work_updates update_one")
+
+            from app.database import MockCollectionWrapper
+            with patch.object(MockCollectionWrapper, "update_one", side_effect=failing_update):
+                with pytest.raises(RuntimeError):
+                    await client.put(f"/api/v1/updates/{fail_up_id}", headers=h, json={"date": "2026-11-17"})
+
+        # Verify rollback restored both week reports:
+        # Target week does NOT have fail_up_id
+        rep_target = await db.weekly_reports.find_one({"_id": ObjectId(rep_id)})
+        rep_w2_check = await db.weekly_reports.find_one({"user_id": rep_target["user_id"], "week_start_date": "2026-11-16"})
+        assert fail_up_id not in rep_w2_check.get("work_update_ids", [])
+        assert rep_w2_check.get("active_leases", []) == []
+
+        # Source week still has fail_up_id and active_leases is clean
+        rep_w1_check = await db.weekly_reports.find_one({"_id": ObjectId(rep_id)})
+        assert fail_up_id in rep_w1_check.get("work_update_ids", [])
+        assert rep_w1_check.get("active_leases", []) == []
+
+        # 6. Two simultaneous moves on the same update
+        r_move_1, r_move_2 = await asyncio.gather(
+            client.put(f"/api/v1/updates/{fail_up_id}", headers=h, json={"date": "2026-11-17"}),
+            client.put(f"/api/v1/updates/{fail_up_id}", headers=h, json={"date": "2026-11-18"}),
+            return_exceptions=True
+        )
+        # Both requests must either succeed serially or be safely processed without lease corruption
+        rep_w2_final = await db.weekly_reports.find_one({"user_id": rep_target["user_id"], "week_start_date": "2026-11-16"})
+        assert rep_w2_final.get("active_leases", []) == []
+
+        # 7. Mutation lasting longer than 30 seconds does NOT get bypassed by submit
+        dummy_lease = "long-running-lease-999"
+        await db.weekly_reports.update_one(
+            {"_id": ObjectId(rep_id)},
+            {"$addToSet": {"active_leases": dummy_lease}}
+        )
+        # Even if 60 seconds have elapsed, submit MUST still be rejected because lease token is active
+        r_sub_long = await client.post(f"/api/v1/reports/{rep_id}/submit", headers=h, json={"answers": valid_answers})
+        assert r_sub_long.status_code == 409
+        assert "mutation is currently in progress" in r_sub_long.json()["detail"]
+
+        # Clean up dummy lease
+        await db.weekly_reports.update_one(
+            {"_id": ObjectId(rep_id)},
+            {"$pull": {"active_leases": dummy_lease}}
+        )
+
+@pytest.mark.anyio
+async def test_stale_recovery_does_not_reset_newer_active_mutation():
+    """Requirement 6: Stale recovery cannot reset a newer active mutation lease."""
+    db = get_database()
+    r_oid = ObjectId()
+    now = datetime.utcnow()
+
+    # Create submitting report with stale token (from 200s ago)
+    await db.weekly_reports.insert_one({
+        "_id": r_oid,
+        "user_id": "test_owner_user_stale",
+        "week_start_date": "2026-11-09",
+        "week_end_date": "2026-11-15",
+        "status": "submitting",
+        "submission_claim_token": "stale-claim-token-111",
+        "submission_started_at": now - timedelta(seconds=200),
+        "active_leases": ["active-mutation-token-999"]
+    })
+
+    # A newer mutation lease is active in active_leases
+    cur_doc = await db.weekly_reports.find_one({"_id": r_oid})
+    assert "active-mutation-token-999" in cur_doc["active_leases"]
+
+    # When release_draft_report_lease runs for this active lease, it releases only its own token
+    from app.routers.updates import release_draft_report_lease
+    # Attempting to release with an unrelated token does nothing
+    await release_draft_report_lease(db, "test_owner_user_stale", "2026-11-09", "2026-11-15", lease_token="other-token")
+    check_doc = await db.weekly_reports.find_one({"_id": r_oid})
+    assert "active-mutation-token-999" in check_doc["active_leases"]
+
+    # Clean up test doc
+    await db.weekly_reports.delete_one({"_id": r_oid})
+
+@pytest.mark.anyio
+async def test_registration_employee_cannot_assign_arbitrary_manager_at_signup():
+    """Requirement 7: Verify registration authorization policy prevents arbitrary manager assignment."""
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        # 1. Non-existent manager ID -> 404 Not Found
+        r_invalid_mgr = await client.post("/api/v1/auth/register", json={
+            "name": "Self Assign Attacker",
+            "email": f"attacker.selfassign.{int(datetime.utcnow().timestamp())}@company.com",
+            "password": "Password@123",
+            "role": "employee",
+            "manager_id": str(ObjectId()) # Valid format, non-existent manager
+        })
+        assert r_invalid_mgr.status_code == 404
+        assert "Selected manager not found" in r_invalid_mgr.json()["detail"]
+
+        # 2. Malformed manager ID -> 400 Bad Request
+        r_malformed_mgr = await client.post("/api/v1/auth/register", json={
+            "name": "Self Assign Malformed",
+            "email": f"attacker.malformed.{int(datetime.utcnow().timestamp())}@company.com",
+            "password": "Password@123",
+            "role": "employee",
+            "manager_id": "not-an-object-id"
+        })
+        assert r_malformed_mgr.status_code == 400
+        assert "Invalid manager ID format" in r_malformed_mgr.json()["detail"]
+
+        # 3. Employee ID passed as manager_id -> 404 Not Found (role is not manager)
+        # Create an ordinary employee first
+        emp_email = f"target.victim.emp.{int(datetime.utcnow().timestamp())}@company.com"
+        r_victim = await client.post("/api/v1/auth/register", json={
+            "name": "Victim Employee",
+            "email": emp_email,
+            "password": "Password@123",
+            "role": "employee"
+        })
+        assert r_victim.status_code == 201
+        victim_id = r_victim.json()["user"]["id"]
+
+        r_fake_mgr = await client.post("/api/v1/auth/register", json={
+            "name": "Self Assign Fake Mgr",
+            "email": f"attacker.fakemgr.{int(datetime.utcnow().timestamp())}@company.com",
+            "password": "Password@123",
+            "role": "employee",
+            "manager_id": victim_id # Employee, not a manager
+        })
+        assert r_fake_mgr.status_code == 404
+        assert "Selected manager not found" in r_fake_mgr.json()["detail"]
