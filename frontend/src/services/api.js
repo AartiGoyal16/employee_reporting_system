@@ -57,9 +57,11 @@ export const updateService = {
 
 // Weekly Questions Services
 export const questionService = {
-  getQuestions: () => api.get('/questions'),
+  getQuestions: (params) => api.get('/questions', { params }),
   createQuestion: (data) => api.post('/questions', data),
   updateQuestion: (id, data) => api.put(`/questions/${id}`, data),
+  toggleQuestion: (id) => api.patch(`/questions/${id}/toggle`),
+  deleteQuestion: (id) => api.delete(`/questions/${id}`),
 };
 
 // Weekly Reports Services
@@ -88,6 +90,7 @@ export const managerService = {
   getEmployees: () => api.get('/manager/employees'),
   getReports: (params) => api.get('/manager/reports', { params }),
   getReportDetail: (id) => api.get(`/manager/reports/${id}`),
+  sendReminders: () => api.post('/manager/send-reminders'),
 };
 
 export default api;

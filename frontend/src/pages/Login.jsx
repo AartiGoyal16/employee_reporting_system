@@ -148,6 +148,13 @@ export const Login = () => {
               <LogIn className="w-4 h-4" />
               {loading ? 'Signing in...' : 'Sign In'}
             </button>
+
+            <div className="pt-2 text-center">
+              <span className="text-xs text-slate-500">Don't have an account? </span>
+              <Link to="/signup" className="text-xs font-semibold text-blue-600 hover:text-blue-700 hover:underline">
+                Create an account &rarr;
+              </Link>
+            </div>
           </form>
 
           {/* Quick Demo Switcher Section */}

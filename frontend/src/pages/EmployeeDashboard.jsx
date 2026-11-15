@@ -15,7 +15,8 @@ import {
   AlertCircle,
   TrendingUp,
   Search,
-  Filter
+  Filter,
+  History
 } from 'lucide-react';
 
 export const EmployeeDashboard = () => {
@@ -108,7 +109,15 @@ export const EmployeeDashboard = () => {
             </p>
           </div>
 
-          <div className="flex items-center gap-3">
+          <div className="flex flex-wrap items-center gap-3">
+            <Link
+              to="/employee/reports"
+              className="px-3.5 py-2.5 rounded-xl text-sm font-medium bg-white text-slate-700 border border-slate-200 hover:bg-slate-50 flex items-center gap-2 shadow-sm transition-all"
+            >
+              <History className="w-4 h-4 text-slate-500" />
+              <span>Report History</span>
+            </Link>
+
             <Link
               to="/employee/weekly-report"
               className={`px-4 py-2.5 rounded-xl text-sm font-medium flex items-center gap-2 shadow-sm transition-all ${

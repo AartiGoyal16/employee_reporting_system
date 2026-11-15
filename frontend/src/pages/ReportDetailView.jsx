@@ -31,12 +31,12 @@ export const ReportDetailView = () => {
     setLoading(true);
     setError('');
     try {
-      const res = await managerService.getReportDetail(id);
+      const res = await reportService.getReportById(id);
       setReport(res.data);
     } catch (err) {
       console.error(err);
       if (err.response?.status === 403) {
-        setError('Forbidden: This report does not belong to your assigned team members.');
+        setError('Forbidden: You do not have permission to view this report.');
       } else {
         setError('Failed to load report details.');
       }

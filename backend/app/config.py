@@ -21,6 +21,16 @@ class Settings(BaseSettings):
     GEMINI_API_KEY: Optional[str] = None
     GROQ_API_KEY: Optional[str] = None
     OPENAI_API_KEY: Optional[str] = None
+
+    # Email / SMTP (optional — falls back to log-only if not set)
+    SMTP_HOST: Optional[str] = None
+    SMTP_PORT: int = 587
+    SMTP_USER: Optional[str] = None
+    SMTP_PASSWORD: Optional[str] = None
+    EMAIL_FROM: str = "noreply@employee-reporting.local"
+
+    # Deadline reminder day (lowercase weekday name, e.g. 'saturday')
+    REMINDER_DAY: str = "saturday"
     
     # CORS
     BACKEND_CORS_ORIGINS: List[str] = [

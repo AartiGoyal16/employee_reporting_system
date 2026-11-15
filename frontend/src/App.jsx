@@ -3,9 +3,12 @@ import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { ProtectedRoute } from './components/ProtectedRoute';
 import { Login } from './pages/Login';
+import { Signup } from './pages/Signup';
 import { EmployeeDashboard } from './pages/EmployeeDashboard';
 import { WeeklyReportPage } from './pages/WeeklyReportPage';
+import { ReportHistoryPage } from './pages/ReportHistoryPage';
 import { ManagerDashboard } from './pages/ManagerDashboard';
+import { QuestionManagerPage } from './pages/QuestionManagerPage';
 import { ReportDetailView } from './pages/ReportDetailView';
 import { NotFound } from './pages/NotFound';
 
@@ -38,6 +41,7 @@ export default function App() {
         <Routes>
           <Route path="/" element={<RootRedirect />} />
           <Route path="/login" element={<Login />} />
+          <Route path="/signup" element={<Signup />} />
 
           {/* Employee Routes */}
           <Route
@@ -56,6 +60,22 @@ export default function App() {
               </ProtectedRoute>
             }
           />
+          <Route
+            path="/employee/reports"
+            element={
+              <ProtectedRoute allowedRoles={['employee']}>
+                <ReportHistoryPage />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/reports/:id"
+            element={
+              <ProtectedRoute allowedRoles={['employee', 'manager']}>
+                <ReportDetailView />
+              </ProtectedRoute>
+            }
+          />
 
           {/* Manager Routes */}
           <Route
@@ -63,6 +83,14 @@ export default function App() {
             element={
               <ProtectedRoute allowedRoles={['manager']}>
                 <ManagerDashboard />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/manager/questions"
+            element={
+              <ProtectedRoute allowedRoles={['manager']}>
+                <QuestionManagerPage />
               </ProtectedRoute>
             }
           />

@@ -9,7 +9,8 @@ import {
   UserCircle, 
   Layers, 
   Sparkles,
-  Settings
+  Settings,
+  History
 } from 'lucide-react';
 
 export const Navbar = ({ onOpenQuestionModal }) => {
@@ -71,6 +72,17 @@ export const Navbar = ({ onOpenQuestionModal }) => {
                     <FileText className="w-4 h-4" />
                     Weekly Report
                   </Link>
+                  <Link
+                    to="/employee/reports"
+                    className={`px-3 py-2 rounded-lg text-sm font-medium flex items-center gap-2 transition-colors ${
+                      isActive('/employee/reports')
+                        ? 'bg-blue-50 text-blue-700'
+                        : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'
+                    }`}
+                  >
+                    <History className="w-4 h-4" />
+                    Report History
+                  </Link>
                 </>
               )}
 
@@ -87,15 +99,17 @@ export const Navbar = ({ onOpenQuestionModal }) => {
                     <Users className="w-4 h-4" />
                     Team Dashboard
                   </Link>
-                  {onOpenQuestionModal && (
-                    <button
-                      onClick={onOpenQuestionModal}
-                      className="px-3 py-2 rounded-lg text-sm font-medium text-slate-600 hover:text-slate-900 hover:bg-slate-50 flex items-center gap-2 transition-colors"
-                    >
-                      <Settings className="w-4 h-4" />
-                      Configure Questions
-                    </button>
-                  )}
+                  <Link
+                    to="/manager/questions"
+                    className={`px-3 py-2 rounded-lg text-sm font-medium flex items-center gap-2 transition-colors ${
+                      isActive('/manager/questions')
+                        ? 'bg-indigo-50 text-indigo-700'
+                        : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'
+                    }`}
+                  >
+                    <Settings className="w-4 h-4" />
+                    Configure Questions
+                  </Link>
                 </>
               )}
             </nav>
