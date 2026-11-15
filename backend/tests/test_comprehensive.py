@@ -489,6 +489,27 @@ async def test_production_cors_wildcard_rejected():
         )
 
 @pytest.mark.anyio
+async def test_production_cors_format_parsing():
+    """Verifies that CORS origins can be passed as JSON list, comma-separated string, or single string."""
+    s_single = Settings(
+        ENVIRONMENT="development",
+        BACKEND_CORS_ORIGINS="https://app.vercel.app"
+    )
+    assert s_single.BACKEND_CORS_ORIGINS == ["https://app.vercel.app"]
+
+    s_comma = Settings(
+        ENVIRONMENT="development",
+        BACKEND_CORS_ORIGINS="https://app.vercel.app, https://other.app"
+    )
+    assert s_comma.BACKEND_CORS_ORIGINS == ["https://app.vercel.app", "https://other.app"]
+
+    s_json = Settings(
+        ENVIRONMENT="development",
+        BACKEND_CORS_ORIGINS='["https://app.vercel.app"]'
+    )
+    assert s_json.BACKEND_CORS_ORIGINS == ["https://app.vercel.app"]
+
+@pytest.mark.anyio
 async def test_demo_users_endpoint_disabled_in_production():
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:

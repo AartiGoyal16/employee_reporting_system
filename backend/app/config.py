@@ -1,6 +1,7 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic import model_validator
-from typing import Optional, List
+from pydantic import model_validator, field_validator
+from typing import Optional, List, Union
+import json
 import os
 
 class Settings(BaseSettings):
@@ -29,12 +30,31 @@ class Settings(BaseSettings):
     OPENAI_API_KEY: Optional[str] = None
     
     # CORS
-    BACKEND_CORS_ORIGINS: List[str] = [
+    BACKEND_CORS_ORIGINS: Union[List[str], str] = [
         "http://localhost:5173",
         "http://127.0.0.1:5173",
         "http://localhost:3000",
         "http://localhost:4173",
     ]
+
+    @field_validator("BACKEND_CORS_ORIGINS", mode="after")
+    @classmethod
+    def assemble_cors_origins(cls, v):
+        if isinstance(v, str):
+            v = v.strip()
+            if not v:
+                return []
+            if v.startswith("[") and v.endswith("]"):
+                try:
+                    parsed = json.loads(v)
+                    if isinstance(parsed, list):
+                        return [str(item).strip() for item in parsed if str(item).strip()]
+                except Exception:
+                    pass
+            return [origin.strip() for origin in v.split(",") if origin.strip()]
+        elif isinstance(v, (list, tuple)):
+            return [str(item).strip() for item in v if str(item).strip()]
+        return v
 
     @model_validator(mode="after")
     def validate_production_and_security(self):

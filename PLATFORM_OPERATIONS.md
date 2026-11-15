@@ -183,6 +183,8 @@ MongoDB is used as the document store. Documents are structured to support fast,
 
 ## 4. Cloud Deployment Runbook
 
+> **Architecture & Scope Notice**: Email delivery and SMTP deadline reminder notifications have been intentionally removed and are not included in this system. The deployment focus is strictly on core daily update tracking, reflection answers, atomic weekly report submission, AI summarization with deterministic fallback, PDF export, and manager accountability oversight.
+
 ### 4.1 Hosted MongoDB Atlas Setup
 1. Create a free shared cluster (M0) on [MongoDB Atlas](https://www.mongodb.com/atlas).
 2. Under **Database Access**, create a user `reporting_user` with read/write privileges.
@@ -236,7 +238,7 @@ MongoDB is used as the document store. Documents are structured to support fast,
 
 ---
 
-### 4.3 Frontend Deployment on Vercel
+### 4.4 Frontend Deployment on Vercel
 
 1. Log in to [Vercel](https://vercel.com/) and click **Add New → Project**.
 2. Import the GitHub repository.

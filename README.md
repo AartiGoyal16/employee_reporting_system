@@ -197,6 +197,83 @@ Open your browser at `http://localhost:5173`.
 
 ---
 
-## 🌐 Deployment Instructions
+## 🌐 Production Cloud Deployment Guide
 
-Refer to [`PLATFORM_OPERATIONS.md`](./PLATFORM_OPERATIONS.md) for step-by-step instructions on deploying the React frontend to **Vercel** and the FastAPI backend to **Render**, along with MongoDB Atlas configuration.
+> **Note on Email & Notifications**: In accordance with the assessment requirements, email delivery and SMTP reminder scheduler functionality are intentionally **not included**. The application focuses strictly on core work tracking, weekly reporting, reflection answers, AI summarization, submitted report immutability, PDF export, and manager accountability oversight.
+
+### 1. MongoDB Atlas Setup
+1. Create a free shared cluster (M0) on [MongoDB Atlas](https://www.mongodb.com/atlas).
+2. **Database Access**: Create a database user (e.g. `reporting_user`) with `Read and write to any database` privileges. Ensure password characters that are URI-reserved (like `@`, `:`, `/`) are URL-encoded.
+3. **Network Access**: Add IP address `0.0.0.0/0` (Allow Access from Anywhere) to allow inbound connections from Render's cloud servers.
+4. Copy the connection string (format: `mongodb+srv://reporting_user:<PASSWORD>@cluster0.mongodb.net/employee_reporting_db?retryWrites=true&w=majority`).
+
+### 2. Backend Deployment on Render
+1. Log in to [Render](https://render.com/) and create a new **Web Service** connected to this repository (or use the included `render.yaml` Blueprint).
+2. Configure settings:
+   - **Root Directory**: `backend`
+   - **Runtime**: `Python 3`
+   - **Build Command**: `pip install -r requirements.txt`
+   - **Start Command**: `uvicorn app.main:app --host 0.0.0.0 --port $PORT`
+   - **Health Check Path**: `/health`
+3. Set Environment Variables in Render:
+   - `ENVIRONMENT`: `production` *(Enforces strict security, disables demo-users endpoint, and mandates MongoDB connectivity)*
+   - `MONGODB_URI`: *Your MongoDB Atlas connection URI*
+   - `DATABASE_NAME`: `employee_reporting_db`
+   - `JWT_SECRET_KEY`: *A strong, secure secret of at least 32 characters*
+   - `ALGORITHM`: `HS256`
+   - `ACCESS_TOKEN_EXPIRE_MINUTES`: `10080`
+   - `BACKEND_CORS_ORIGINS`: `["https://your-app.vercel.app"]` *(Exact Vercel frontend URL; single URL, comma-separated, or JSON array)*
+   - `GEMINI_API_KEY`: *(Optional) Your Google AI Studio API key*
+   - `GEMINI_MODEL`: `gemini-3.5-flash-lite`
+   - `GROQ_API_KEY`: *(Optional) Your Groq API key for secondary fallback*
+   - `SEED_DEMO_ACCOUNTS`: `"true"` for initial deployment to seed evaluation accounts, then set to `"false"`
+   - `ENABLE_DEMO_USERS`: `"false"` *(Disables public demo credentials endpoint in production)*
+4. Click **Deploy**. Note your backend URL (e.g., `https://employee-reporting-api.onrender.com`).
+
+### 3. Frontend Deployment on Vercel
+1. Log in to [Vercel](https://vercel.com/) and create a new project importing this repository.
+2. Configure settings:
+   - **Framework Preset**: `Vite`
+   - **Root Directory**: `frontend`
+   - **Build Command**: `npm run build`
+   - **Output Directory**: `dist`
+3. Environment Variables:
+   - `VITE_API_BASE_URL`: `https://employee-reporting-api.onrender.com/api/v1` *(Your Render backend URL with /api/v1)*
+4. Click **Deploy**. Vercel will deploy your application with full SPA client-side routing powered by `frontend/vercel.json`.
+
+### 4. Health Check & Connectivity Verification
+Verify your deployment by querying the health endpoint:
+```bash
+curl https://employee-reporting-api.onrender.com/health
+```
+Expected output:
+```json
+{
+  "status": "healthy",
+  "service": "Employee Work & Weekly Reporting System",
+  "environment": "production",
+  "database": "mongodb_connected"
+}
+```
+If MongoDB is unreachable, the endpoint returns HTTP `503 Service Unavailable` with details, preventing traffic from reaching an unbacked API.
+
+### 5. Troubleshooting MongoDB Connection Failures
+- **ServerSelectionTimeoutError / Connection Timeout**: Ensure Atlas Network Access includes `0.0.0.0/0`.
+- **Authentication Failed**: Verify database username and password in Atlas Database Access. If the password has special characters (`@`, `:`, `#`), URL-encode them.
+- **Production Startup Error**: In production, falling back to an in-memory mock database is prohibited for safety. Ensure `MONGODB_URI` is correctly provided.
+
+### 6. Testing Core Workflow with Evaluation Accounts
+Log in at your deployed Vercel URL using the pre-seeded evaluation accounts:
+1. **Manager Flow**:
+   - Log in as Sarah Chen (`manager@company.com` / `Manager@123`).
+   - View assigned team members (Alex Rivera and Priya Patel) on the Manager Dashboard.
+   - Inspect team weekly report submissions and AI-synthesized executive summaries.
+   - Export official branded executive PDFs.
+2. **Employee Flow**:
+   - Log in as Alex Rivera (`alex@company.com` / `Employee@123`).
+   - Create, edit, and delete daily work updates with hours spent and category tags.
+   - Review current weekly report draft with updates automatically linked.
+   - Fill in reflection questions and submit the report.
+   - Verify report locks into immutable submitted mode with generated AI summary and PDF download.
+
+For additional architectural details and edge cases, refer to [`PLATFORM_OPERATIONS.md`](./PLATFORM_OPERATIONS.md).
