@@ -35,8 +35,18 @@ export const ManagerDashboard = () => {
     setReminderToast(null);
     try {
       const res = await managerService.sendReminders();
-      setReminderToast({ type: 'success', message: `Deadline reminders sent to ${res.data.sent_count} team members!` });
-      setTimeout(() => setReminderToast(null), 5000);
+      const data = res.data;
+      if (data.status === 'success') {
+        setReminderToast({ type: 'success', message: data.message || `Deadline reminders sent to ${data.sent_count} team members!` });
+      } else if (data.status === 'partial_success') {
+        setReminderToast({ type: 'warning', message: data.message });
+      } else if (data.status === 'failed' || data.status === 'smtp_not_configured') {
+        setReminderToast({ type: 'error', message: data.message });
+      } else {
+        // Zero emails sent: all_submitted, already_reminded, no_eligible
+        setReminderToast({ type: 'info', message: data.message });
+      }
+      setTimeout(() => setReminderToast(null), 6000);
     } catch (err) {
       setReminderToast({ type: 'error', message: 'Failed to send reminders.' });
     } finally {
@@ -129,12 +139,18 @@ export const ManagerDashboard = () => {
           <div className={`p-4 rounded-2xl text-xs font-semibold flex items-center gap-2 mb-6 shadow-sm border ${
             reminderToast.type === 'success'
               ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
+              : reminderToast.type === 'warning'
+              ? 'bg-amber-50 text-amber-800 border-amber-200'
+              : reminderToast.type === 'info'
+              ? 'bg-blue-50 text-blue-800 border-blue-200'
               : 'bg-red-50 text-red-800 border-red-200'
           }`}>
             {reminderToast.type === 'success' ? (
               <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+            ) : reminderToast.type === 'info' ? (
+              <Bell className="w-4 h-4 text-blue-600 shrink-0" />
             ) : (
-              <AlertCircle className="w-4 h-4 text-red-600 shrink-0" />
+              <AlertCircle className="w-4 h-4 text-amber-600 shrink-0" />
             )}
             <span>{reminderToast.message}</span>
           </div>

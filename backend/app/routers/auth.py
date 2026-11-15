@@ -30,25 +30,15 @@ async def register(payload: RegisterRequest):
             detail="An account with this email address already exists. Please log in instead."
         )
 
-    # 2. Validate manager_id if provided
-    resolved_manager_id = None
-    resolved_manager_name = None
+    # 2. Registration Authorization:
+    # Public registrants cannot assign themselves to an arbitrary manager.
+    # New employees must register without a manager and be claimed/assigned by their manager.
     if payload.manager_id:
-        try:
-            m_oid = ObjectId(payload.manager_id)
-        except Exception:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Invalid manager ID format."
-            )
-        manager = await db.users.find_one({"_id": m_oid, "role": "manager"})
-        if not manager:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Selected manager not found. Please choose a valid manager."
-            )
-        resolved_manager_id = str(manager["_id"])
-        resolved_manager_name = manager["name"]
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Direct manager assignment during public registration is not permitted. New employees are registered unassigned and must be assigned by their manager."
+        )
+    resolved_manager_id = None
 
     # 3. Security: Public registration ALWAYS creates employee role
     account_role = "employee"

@@ -23,6 +23,8 @@ export const QuestionManagerPage = () => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [successMsg, setSuccessMsg] = useState('');
+  const [warningMsg, setWarningMsg] = useState('');
+  const [infoMsg, setInfoMsg] = useState('');
   const [newKey, setNewKey] = useState('');
   const [newText, setNewText] = useState('');
   const [adding, setAdding] = useState(false);
@@ -120,13 +122,26 @@ export const QuestionManagerPage = () => {
     setSendingReminders(true);
     setReminderResult(null);
     setError('');
+    setSuccessMsg('');
+    setWarningMsg('');
+    setInfoMsg('');
     try {
       const res = await managerService.sendReminders();
-      setReminderResult(res.data);
-      setSuccessMsg(`Deadline reminders sent to ${res.data.sent_count} team members!`);
+      const data = res.data;
+      setReminderResult(data);
+      if (data.status === 'success') {
+        setSuccessMsg(data.message || `Deadline reminders sent to ${data.sent_count} team members!`);
+      } else if (data.status === 'partial_success') {
+        setWarningMsg(data.message || `Reminders partially sent (${data.sent_count} sent, ${data.failed_count} failed).`);
+      } else if (data.status === 'failed' || data.status === 'smtp_not_configured') {
+        setError(data.message || 'Failed to dispatch deadline reminders.');
+      } else {
+        // Zero emails sent: all_submitted, already_reminded, no_eligible, skipped
+        setInfoMsg(data.message || 'No eligible employees require reminders at this time.');
+      }
     } catch (err) {
       console.error(err);
-      setError('Failed to trigger deadline reminders.');
+      setError(err.response?.data?.detail || 'Failed to trigger deadline reminders.');
     } finally {
       setSendingReminders(false);
     }
@@ -181,6 +196,20 @@ export const QuestionManagerPage = () => {
           </div>
         )}
 
+        {warningMsg && (
+          <div className="p-4 bg-amber-50 border border-amber-200 rounded-2xl text-sm text-amber-800 flex items-center gap-3 mb-6">
+            <AlertCircle className="w-5 h-5 shrink-0 text-amber-600" />
+            <span>{warningMsg}</span>
+          </div>
+        )}
+
+        {infoMsg && (
+          <div className="p-4 bg-blue-50 border border-blue-200 rounded-2xl text-sm text-blue-800 flex items-center gap-3 mb-6">
+            <Bell className="w-5 h-5 shrink-0 text-blue-600" />
+            <span>{infoMsg}</span>
+          </div>
+        )}
+
         {successMsg && (
           <div className="p-4 bg-emerald-50 border border-emerald-200 rounded-2xl text-sm text-emerald-800 flex items-center gap-3 mb-6">
             <CheckCircle2 className="w-5 h-5 shrink-0 text-emerald-600" />
@@ -189,16 +218,48 @@ export const QuestionManagerPage = () => {
         )}
 
         {reminderResult && (
-          <div className="p-4 bg-blue-50 border border-blue-200 rounded-2xl text-xs text-blue-900 mb-6">
-            <p className="font-bold text-sm mb-1">Reminder Run Summary</p>
-            <p>Target Week: {reminderResult.week_start} &rarr; {reminderResult.week_end}</p>
-            <p>Reminders Dispatched: <strong>{reminderResult.sent_count}</strong></p>
+          <div className="p-4 bg-slate-50 border border-slate-200 rounded-2xl text-xs text-slate-800 mb-6 space-y-2">
+            <div className="flex items-center justify-between border-b border-slate-200 pb-2">
+              <span className="font-bold text-sm text-slate-900">Reminder Run Summary</span>
+              <span className="text-[11px] text-slate-500">{reminderResult.week_start} &rarr; {reminderResult.week_end}</span>
+            </div>
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-1">
+              <div className="bg-white p-2 rounded-xl border border-slate-200/60 text-center">
+                <div className="text-[10px] uppercase font-bold text-slate-400">Eligible</div>
+                <div className="text-base font-bold text-slate-800">{reminderResult.eligible_count ?? 0}</div>
+              </div>
+              <div className="bg-white p-2 rounded-xl border border-slate-200/60 text-center">
+                <div className="text-[10px] uppercase font-bold text-slate-400">Sent</div>
+                <div className="text-base font-bold text-emerald-600">{reminderResult.sent_count ?? 0}</div>
+              </div>
+              <div className="bg-white p-2 rounded-xl border border-slate-200/60 text-center">
+                <div className="text-[10px] uppercase font-bold text-slate-400">Skipped</div>
+                <div className="text-base font-bold text-slate-500">{reminderResult.skipped_count ?? 0}</div>
+              </div>
+              <div className="bg-white p-2 rounded-xl border border-slate-200/60 text-center">
+                <div className="text-[10px] uppercase font-bold text-slate-400">Failed</div>
+                <div className="text-base font-bold text-red-500">{reminderResult.failed_count ?? 0}</div>
+              </div>
+            </div>
             {reminderResult.reminded_employees?.length > 0 && (
-              <ul className="mt-2 list-disc list-inside text-blue-800">
-                {reminderResult.reminded_employees.map((e, idx) => (
-                  <li key={idx}>{e.name} ({e.email})</li>
-                ))}
-              </ul>
+              <div className="pt-2">
+                <p className="font-semibold text-slate-700">Successfully Reminded:</p>
+                <ul className="mt-1 list-disc list-inside text-emerald-800">
+                  {reminderResult.reminded_employees.map((e, idx) => (
+                    <li key={idx}>{e.name} ({e.email})</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+            {reminderResult.failed_employees?.length > 0 && (
+              <div className="pt-1">
+                <p className="font-semibold text-red-700">Delivery Failed:</p>
+                <ul className="mt-1 list-disc list-inside text-red-700">
+                  {reminderResult.failed_employees.map((e, idx) => (
+                    <li key={idx}>{e.name} ({e.email})</li>
+                  ))}
+                </ul>
+              </div>
             )}
           </div>
         )}

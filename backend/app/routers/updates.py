@@ -154,7 +154,7 @@ async def release_draft_report_lease(
             "user_id": user_id,
             "week_start_date": week_start,
             "week_end_date": week_end,
-            "status": "draft",
+            "status": {"$in": ["draft", "submitting"]},
             "active_leases": lease_token
         },
         ops
@@ -352,7 +352,18 @@ async def edit_work_update(
     set_fields["updated_at"] = datetime.utcnow()
 
     try:
-        await db.work_updates.update_one({"_id": oid}, {"$set": set_fields})
+        if update_data.date and update_data.date != doc["date"]:
+            res = await db.work_updates.update_one(
+                {"_id": oid, "date": doc["date"]},
+                {"$set": set_fields}
+            )
+            if getattr(res, "matched_count", 0) == 0:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="Work update was concurrently modified or moved."
+                )
+        else:
+            await db.work_updates.update_one({"_id": oid}, {"$set": set_fields})
         mutation_succeeded = True
     except Exception as exc:
         if update_data.date and update_data.date != doc["date"]:

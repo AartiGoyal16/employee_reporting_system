@@ -21,7 +21,7 @@ from app.services.ai_summary import (
     generate_ai_summary_with_retry,
     _sanitize_error
 )
-from app.services.reminder import run_reminder_check
+from app.services.reminder import run_reminder_check, _get_current_week_boundaries
 from app.auth.jwt import create_access_token, decode_access_token
 
 @pytest.fixture(scope="module")
@@ -787,7 +787,7 @@ async def test_reminders_force_true_idempotent_and_smtp_failure():
 
     # 2. Run reminder check again immediately with force=True -> duplicate count must be 0!
     res2 = await run_reminder_check(force=True)
-    assert res2["status"] == "success"
+    assert res2["status"] == "already_reminded"
     assert res2["sent_count"] == 0, "Repeated manager reminder must be idempotent even with force=True"
 
     # 3. Test SMTP failure does not record reminder as sent
@@ -1129,18 +1129,22 @@ async def test_manager_team_assignment_and_unassign():
         mgr_headers = {"Authorization": f"Bearer {r_mgr.json()['access_token']}"}
         mgr_id = r_mgr.json()["user"]["id"]
 
-        # Create a new employee assigned to this manager
+        # Create a new employee (registered unassigned per onboarding policy)
         emp_email = f"teammate.{int(datetime.utcnow().timestamp())}@company.com"
-        await client.post("/api/v1/auth/register", json={
+        r_reg = await client.post("/api/v1/auth/register", json={
             "name": "Team Mate",
             "email": emp_email,
             "password": "Password@123",
-            "role": "employee",
-            "manager_id": mgr_id
+            "role": "employee"
         })
+        assert r_reg.status_code == 201
         db = get_database()
         emp_doc = await db.users.find_one({"email": emp_email})
         emp_id = str(emp_doc["_id"])
+
+        # Manager assigns employee
+        r_assign = await client.post(f"/api/v1/manager/employees/{emp_id}/assign", headers=mgr_headers)
+        assert r_assign.status_code == 200
 
         # Manager unassigns employee
         r_unassign = await client.post(f"/api/v1/manager/employees/{emp_id}/unassign", headers=mgr_headers)
@@ -1175,18 +1179,21 @@ async def test_manager_assignment_conflict_between_two_managers():
         h_mgr_b = {"Authorization": f"Bearer {r_mgr_b.json()['access_token']}"}
         mgr_b_id = r_mgr_b.json()["user"]["id"]
 
-        # Employee assigned to Manager A
+        # Employee registers unassigned, then Manager A assigns employee
         emp_email = f"shared.emp.{int(datetime.utcnow().timestamp())}@company.com"
-        await client.post("/api/v1/auth/register", json={
+        r_reg = await client.post("/api/v1/auth/register", json={
             "name": "Target Employee",
             "email": emp_email,
             "password": "Password@123",
-            "role": "employee",
-            "manager_id": mgr_a_id
+            "role": "employee"
         })
+        assert r_reg.status_code == 201
         db = get_database()
         emp_doc = await db.users.find_one({"email": emp_email})
         emp_id = str(emp_doc["_id"])
+
+        r_assign_a = await client.post(f"/api/v1/manager/employees/{emp_id}/assign", headers=h_mgr_a)
+        assert r_assign_a.status_code == 200
 
         # Manager B attempts to assign this employee -> 409 Conflict
         r_steal = await client.post(f"/api/v1/manager/employees/{emp_id}/assign", headers=h_mgr_b)
@@ -1420,6 +1427,7 @@ async def test_concurrency_controlled_interleavings():
         })
         r_emp = await client.post("/api/v1/auth/login", json={"email": email, "password": "Password@123"})
         h = {"Authorization": f"Bearer {r_emp.json()['access_token']}"}
+        user_id = r_emp.json()["user"]["id"]
         db = get_database()
 
         valid_answers = [
@@ -1525,25 +1533,55 @@ async def test_concurrency_controlled_interleavings():
         })
         fail_up_id = r_new_up.json()["id"]
 
-        async def failing_update(*args, **kwargs):
-            raise RuntimeError("Simulated DB disk failure during work_updates update_one")
+        # Add another operation's lease on both reports to verify it is NOT removed during rollback
+        other_lease_token = "other-concurrent-op-lease-555"
+        await db.weekly_reports.update_one(
+            {"_id": ObjectId(rep_id)},
+            {"$addToSet": {"active_leases": other_lease_token}}
+        )
+        rep_target_doc = await db.weekly_reports.find_one({"user_id": user_id, "week_start_date": "2026-11-16"})
+        if rep_target_doc:
+            await db.weekly_reports.update_one(
+                {"_id": rep_target_doc["_id"]},
+                {"$addToSet": {"active_leases": other_lease_token}}
+            )
 
-            from app.database import MockCollectionWrapper
-            with patch.object(MockCollectionWrapper, "update_one", side_effect=failing_update):
-                with pytest.raises(RuntimeError):
-                    await client.put(f"/api/v1/updates/{fail_up_id}", headers=h, json={"date": "2026-11-17"})
+        from app.database import MockCollectionWrapper
+        orig_wrapper_update_one = MockCollectionWrapper.update_one
+
+        async def failing_update(self, filter_dict, *args, **kwargs):
+            if getattr(self._collection, "name", None) == "work_updates" and isinstance(filter_dict, dict) and filter_dict.get("_id") == ObjectId(fail_up_id):
+                raise RuntimeError("Simulated DB disk failure during work_updates update_one")
+            return await orig_wrapper_update_one(self, filter_dict, *args, **kwargs)
+
+        with patch.object(MockCollectionWrapper, "update_one", side_effect=failing_update, autospec=True):
+            with pytest.raises(RuntimeError):
+                await client.put(f"/api/v1/updates/{fail_up_id}", headers=h, json={"date": "2026-11-17"})
 
         # Verify rollback restored both week reports:
         # Target week does NOT have fail_up_id
         rep_target = await db.weekly_reports.find_one({"_id": ObjectId(rep_id)})
         rep_w2_check = await db.weekly_reports.find_one({"user_id": rep_target["user_id"], "week_start_date": "2026-11-16"})
         assert fail_up_id not in rep_w2_check.get("work_update_ids", [])
-        assert rep_w2_check.get("active_leases", []) == []
+        # Target week move lease was released, but the other operation's lease was preserved
+        assert other_lease_token in rep_w2_check.get("active_leases", [])
+        assert len(rep_w2_check.get("active_leases", [])) == 1
 
-        # Source week still has fail_up_id and active_leases is clean
+        # Source week still has fail_up_id, its move lease was released, and the other operation's lease remains
         rep_w1_check = await db.weekly_reports.find_one({"_id": ObjectId(rep_id)})
         assert fail_up_id in rep_w1_check.get("work_update_ids", [])
-        assert rep_w1_check.get("active_leases", []) == []
+        assert other_lease_token in rep_w1_check.get("active_leases", [])
+        assert len(rep_w1_check.get("active_leases", [])) == 1
+
+        # Verify the work update date is completely unchanged in the database
+        up_doc_check = await db.work_updates.find_one({"_id": ObjectId(fail_up_id)})
+        assert up_doc_check["date"] == "2026-11-10"
+
+        # Clean up other_lease_token
+        await db.weekly_reports.update_many(
+            {"user_id": user_id},
+            {"$pull": {"active_leases": other_lease_token}}
+        )
 
         # 6. Two simultaneous moves on the same update
         r_move_1, r_move_2 = await asyncio.gather(
@@ -1574,7 +1612,8 @@ async def test_concurrency_controlled_interleavings():
 
 @pytest.mark.anyio
 async def test_stale_recovery_does_not_reset_newer_active_mutation():
-    """Requirement 6: Stale recovery cannot reset a newer active mutation lease."""
+    """Requirement 4: Stale recovery calls the actual recovery implementation and protects live leases."""
+    from app.main import recover_stale_submitting_reports
     db = get_database()
     r_oid = ObjectId()
     now = datetime.utcnow()
@@ -1591,65 +1630,230 @@ async def test_stale_recovery_does_not_reset_newer_active_mutation():
         "active_leases": ["active-mutation-token-999"]
     })
 
-    # A newer mutation lease is active in active_leases
-    cur_doc = await db.weekly_reports.find_one({"_id": r_oid})
-    assert "active-mutation-token-999" in cur_doc["active_leases"]
+    # Call the actual recovery implementation!
+    recovered_count = await recover_stale_submitting_reports(db, stale_seconds=120)
+    assert recovered_count >= 1
 
-    # When release_draft_report_lease runs for this active lease, it releases only its own token
-    from app.routers.updates import release_draft_report_lease
-    # Attempting to release with an unrelated token does nothing
-    await release_draft_report_lease(db, "test_owner_user_stale", "2026-11-09", "2026-11-15", lease_token="other-token")
+    # Verify report is recovered to draft, but active mutation lease is PRESERVED
     check_doc = await db.weekly_reports.find_one({"_id": r_oid})
+    assert check_doc["status"] == "draft"
     assert "active-mutation-token-999" in check_doc["active_leases"]
+    assert check_doc.get("submission_claim_token") is None
 
     # Clean up test doc
     await db.weekly_reports.delete_one({"_id": r_oid})
 
 @pytest.mark.anyio
 async def test_registration_employee_cannot_assign_arbitrary_manager_at_signup():
-    """Requirement 7: Verify registration authorization policy prevents arbitrary manager assignment."""
+    """Requirement 3: Verify registration authorization policy prevents manager self-assignment."""
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        # 1. Non-existent manager ID -> 404 Not Found
+        db = get_database()
+        real_mgr = await db.users.find_one({"role": "manager"})
+        real_mgr_id = str(real_mgr["_id"])
+
+        # 1. Registration with a REAL existing manager ID -> 403 Forbidden
+        r_real_mgr = await client.post("/api/v1/auth/register", json={
+            "name": "Self Assign Real Mgr",
+            "email": f"attacker.realmgr.{int(datetime.utcnow().timestamp())}@company.com",
+            "password": "Password@123",
+            "role": "employee",
+            "manager_id": real_mgr_id
+        })
+        assert r_real_mgr.status_code == 403
+        assert "Direct manager assignment during public registration is not permitted" in r_real_mgr.json()["detail"]
+
+        # 2. Registration with a non-existent manager ID -> 403 Forbidden
         r_invalid_mgr = await client.post("/api/v1/auth/register", json={
             "name": "Self Assign Attacker",
             "email": f"attacker.selfassign.{int(datetime.utcnow().timestamp())}@company.com",
             "password": "Password@123",
             "role": "employee",
-            "manager_id": str(ObjectId()) # Valid format, non-existent manager
+            "manager_id": str(ObjectId())
         })
-        assert r_invalid_mgr.status_code == 404
-        assert "Selected manager not found" in r_invalid_mgr.json()["detail"]
+        assert r_invalid_mgr.status_code == 403
+        assert "Direct manager assignment during public registration is not permitted" in r_invalid_mgr.json()["detail"]
 
-        # 2. Malformed manager ID -> 400 Bad Request
-        r_malformed_mgr = await client.post("/api/v1/auth/register", json={
-            "name": "Self Assign Malformed",
-            "email": f"attacker.malformed.{int(datetime.utcnow().timestamp())}@company.com",
-            "password": "Password@123",
-            "role": "employee",
-            "manager_id": "not-an-object-id"
-        })
-        assert r_malformed_mgr.status_code == 400
-        assert "Invalid manager ID format" in r_malformed_mgr.json()["detail"]
-
-        # 3. Employee ID passed as manager_id -> 404 Not Found (role is not manager)
-        # Create an ordinary employee first
-        emp_email = f"target.victim.emp.{int(datetime.utcnow().timestamp())}@company.com"
-        r_victim = await client.post("/api/v1/auth/register", json={
-            "name": "Victim Employee",
-            "email": emp_email,
+        # 3. Legitimate registration without manager_id succeeds with manager_id: None
+        legit_email = f"legit.newemp.{int(datetime.utcnow().timestamp())}@company.com"
+        r_legit = await client.post("/api/v1/auth/register", json={
+            "name": "Legit Employee",
+            "email": legit_email,
             "password": "Password@123",
             "role": "employee"
         })
-        assert r_victim.status_code == 201
-        victim_id = r_victim.json()["user"]["id"]
+        assert r_legit.status_code == 201
+        assert r_legit.json()["user"]["manager_id"] is None
 
-        r_fake_mgr = await client.post("/api/v1/auth/register", json={
-            "name": "Self Assign Fake Mgr",
-            "email": f"attacker.fakemgr.{int(datetime.utcnow().timestamp())}@company.com",
-            "password": "Password@123",
-            "role": "employee",
-            "manager_id": victim_id # Employee, not a manager
-        })
-        assert r_fake_mgr.status_code == 404
-        assert "Selected manager not found" in r_fake_mgr.json()["detail"]
+        # Verify in database that employee was created with manager_id: None
+        legit_doc = await db.users.find_one({"email": legit_email})
+        assert legit_doc["manager_id"] is None
+
+@pytest.mark.anyio
+async def test_team_reminder_result_handling_eight_scenarios():
+    """Requirement 1: Test all 8 reminder scenarios verifying accurate counts, idempotency, and status."""
+    db = get_database()
+    week_start, week_end = _get_current_week_boundaries()
+
+    # Scenario 1: Manager has two eligible employees and both emails succeed
+    mgr1_oid = ObjectId()
+    await db.users.insert_one({
+        "_id": mgr1_oid,
+        "name": "Reminder Manager 1",
+        "email": f"rem.mgr1.{int(datetime.utcnow().timestamp())}@company.com",
+        "role": "manager"
+    })
+    emp1_oid = ObjectId()
+    emp2_oid = ObjectId()
+    await db.users.insert_many([
+        {"_id": emp1_oid, "name": "Emp 1", "email": f"rem.emp1.{int(datetime.utcnow().timestamp())}@company.com", "role": "employee", "manager_id": str(mgr1_oid)},
+        {"_id": emp2_oid, "name": "Emp 2", "email": f"rem.emp2.{int(datetime.utcnow().timestamp())}@company.com", "role": "employee", "manager_id": str(mgr1_oid)},
+    ])
+
+    res1 = await run_reminder_check(manager_id=str(mgr1_oid), force=True)
+    assert res1["status"] == "success"
+    assert res1["eligible_count"] == 2
+    assert res1["sent_count"] == 2
+    assert res1["skipped_count"] == 0
+    assert res1["failed_count"] == 0
+    assert len(res1["reminded_employees"]) == 2
+
+    # Scenario 8: A second reminder request does not duplicate successful reminders
+    res8 = await run_reminder_check(manager_id=str(mgr1_oid), force=True)
+    assert res8["status"] == "already_reminded"
+    assert res8["sent_count"] == 0
+    assert res8["eligible_count"] == 0
+    assert res8["skipped_count"] == 2
+    assert res8["skipped_details"]["already_reminded_count"] == 2
+
+    # Scenario 2: No employees are assigned to the manager
+    mgr2_oid = ObjectId()
+    await db.users.insert_one({
+        "_id": mgr2_oid,
+        "name": "Reminder Manager 2 (Empty)",
+        "email": f"rem.mgr2.{int(datetime.utcnow().timestamp())}@company.com",
+        "role": "manager"
+    })
+    res2 = await run_reminder_check(manager_id=str(mgr2_oid), force=True)
+    assert res2["status"] == "no_eligible"
+    assert res2["eligible_count"] == 0
+    assert res2["sent_count"] == 0
+    assert res2["skipped_details"]["no_employees_assigned"] is True
+
+    # Scenario 3: All assigned employees have submitted their reports
+    mgr3_oid = ObjectId()
+    await db.users.insert_one({
+        "_id": mgr3_oid,
+        "name": "Reminder Manager 3",
+        "email": f"rem.mgr3.{int(datetime.utcnow().timestamp())}@company.com",
+        "role": "manager"
+    })
+    emp3a_oid = ObjectId()
+    emp3b_oid = ObjectId()
+    await db.users.insert_many([
+        {"_id": emp3a_oid, "name": "Emp 3A", "email": f"rem.emp3a.{int(datetime.utcnow().timestamp())}@company.com", "role": "employee", "manager_id": str(mgr3_oid)},
+        {"_id": emp3b_oid, "name": "Emp 3B", "email": f"rem.emp3b.{int(datetime.utcnow().timestamp())}@company.com", "role": "employee", "manager_id": str(mgr3_oid)},
+    ])
+    await db.weekly_reports.insert_many([
+        {"_id": ObjectId(), "user_id": str(emp3a_oid), "week_start_date": week_start, "week_end_date": week_end, "status": "submitted"},
+        {"_id": ObjectId(), "user_id": str(emp3b_oid), "week_start_date": week_start, "week_end_date": week_end, "status": "submitted"},
+    ])
+    res3 = await run_reminder_check(manager_id=str(mgr3_oid), force=True)
+    assert res3["status"] == "all_submitted"
+    assert res3["eligible_count"] == 0
+    assert res3["sent_count"] == 0
+    assert res3["skipped_count"] == 2
+    assert res3["skipped_details"]["submitted_count"] == 2
+
+    # Scenario 4: Both employees were already reminded
+    mgr4_oid = ObjectId()
+    await db.users.insert_one({
+        "_id": mgr4_oid,
+        "name": "Reminder Manager 4",
+        "email": f"rem.mgr4.{int(datetime.utcnow().timestamp())}@company.com",
+        "role": "manager"
+    })
+    emp4a_oid = ObjectId()
+    emp4b_oid = ObjectId()
+    await db.users.insert_many([
+        {"_id": emp4a_oid, "name": "Emp 4A", "email": f"rem.emp4a.{int(datetime.utcnow().timestamp())}@company.com", "role": "employee", "manager_id": str(mgr4_oid)},
+        {"_id": emp4b_oid, "name": "Emp 4B", "email": f"rem.emp4b.{int(datetime.utcnow().timestamp())}@company.com", "role": "employee", "manager_id": str(mgr4_oid)},
+    ])
+    now = datetime.utcnow()
+    await db.reminder_logs.insert_many([
+        {"user_id": str(emp4a_oid), "week_start_date": week_start, "type": "deadline_reminder", "status": "sent", "sent_at": now},
+        {"user_id": str(emp4b_oid), "week_start_date": week_start, "type": "deadline_reminder", "status": "sent", "sent_at": now},
+    ])
+    res4 = await run_reminder_check(manager_id=str(mgr4_oid), force=True)
+    assert res4["status"] == "already_reminded"
+    assert res4["eligible_count"] == 0
+    assert res4["sent_count"] == 0
+    assert res4["skipped_count"] == 2
+    assert res4["skipped_details"]["already_reminded_count"] == 2
+
+    # Scenario 5: SMTP is not configured
+    mgr5_oid = ObjectId()
+    await db.users.insert_one({
+        "_id": mgr5_oid,
+        "name": "Reminder Manager 5",
+        "email": f"rem.mgr5.{int(datetime.utcnow().timestamp())}@company.com",
+        "role": "manager"
+    })
+    emp5a_oid = ObjectId()
+    emp5b_oid = ObjectId()
+    await db.users.insert_many([
+        {"_id": emp5a_oid, "name": "Emp 5A", "email": f"rem.emp5a.{int(datetime.utcnow().timestamp())}@company.com", "role": "employee", "manager_id": str(mgr5_oid)},
+        {"_id": emp5b_oid, "name": "Emp 5B", "email": f"rem.emp5b.{int(datetime.utcnow().timestamp())}@company.com", "role": "employee", "manager_id": str(mgr5_oid)},
+    ])
+    with patch("app.services.email_service.is_smtp_configured", return_value=False):
+        res5 = await run_reminder_check(manager_id=str(mgr5_oid), force=True)
+        assert res5["status"] == "smtp_not_configured"
+        assert res5["eligible_count"] == 2
+        assert res5["sent_count"] == 0
+        assert res5["failed_count"] == 2
+        assert len(res5["failed_employees"]) == 2
+
+    # Scenario 6: SMTP fails for all recipients
+    mgr6_oid = ObjectId()
+    await db.users.insert_one({
+        "_id": mgr6_oid,
+        "name": "Reminder Manager 6",
+        "email": f"rem.mgr6.{int(datetime.utcnow().timestamp())}@company.com",
+        "role": "manager"
+    })
+    emp6a_oid = ObjectId()
+    emp6b_oid = ObjectId()
+    await db.users.insert_many([
+        {"_id": emp6a_oid, "name": "Emp 6A", "email": f"rem.emp6a.{int(datetime.utcnow().timestamp())}@company.com", "role": "employee", "manager_id": str(mgr6_oid)},
+        {"_id": emp6b_oid, "name": "Emp 6B", "email": f"rem.emp6b.{int(datetime.utcnow().timestamp())}@company.com", "role": "employee", "manager_id": str(mgr6_oid)},
+    ])
+    with patch("app.services.reminder.send_reminder_email", return_value=False):
+        res6 = await run_reminder_check(manager_id=str(mgr6_oid), force=True)
+        assert res6["status"] == "failed"
+        assert res6["eligible_count"] == 2
+        assert res6["sent_count"] == 0
+        assert res6["failed_count"] == 2
+        assert len(res6["failed_employees"]) == 2
+
+    # Scenario 7: One email succeeds and another fails
+    mgr7_oid = ObjectId()
+    await db.users.insert_one({
+        "_id": mgr7_oid,
+        "name": "Reminder Manager 7",
+        "email": f"rem.mgr7.{int(datetime.utcnow().timestamp())}@company.com",
+        "role": "manager"
+    })
+    emp7a_oid = ObjectId()
+    emp7b_oid = ObjectId()
+    await db.users.insert_many([
+        {"_id": emp7a_oid, "name": "Emp 7A", "email": f"rem.emp7a.{int(datetime.utcnow().timestamp())}@company.com", "role": "employee", "manager_id": str(mgr7_oid)},
+        {"_id": emp7b_oid, "name": "Emp 7B", "email": f"rem.emp7b.{int(datetime.utcnow().timestamp())}@company.com", "role": "employee", "manager_id": str(mgr7_oid)},
+    ])
+    with patch("app.services.reminder.send_reminder_email", side_effect=[True, False]):
+        res7 = await run_reminder_check(manager_id=str(mgr7_oid), force=True)
+        assert res7["status"] == "partial_success"
+        assert res7["eligible_count"] == 2
+        assert res7["sent_count"] == 1
+        assert res7["failed_count"] == 1
+        assert len(res7["reminded_employees"]) == 1
+        assert len(res7["failed_employees"]) == 1

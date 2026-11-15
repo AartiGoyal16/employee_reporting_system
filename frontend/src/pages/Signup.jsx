@@ -104,9 +104,6 @@ export const Signup = () => {
       password: formData.password,
       role: formData.role,
       department: formData.department,
-      ...(formData.role === 'employee' && formData.manager_id
-        ? { manager_id: formData.manager_id }
-        : {}),
     };
 
     try {
@@ -249,38 +246,16 @@ export const Signup = () => {
               </div>
             </div>
 
-            {/* Manager dropdown — only for employees */}
-            {formData.role === 'employee' && (
+            {/* Team Manager Assignment Info */}
+            <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl text-xs text-slate-600 flex items-start gap-2.5">
+              <Users className="w-4 h-4 text-indigo-600 shrink-0 mt-0.5" />
               <div>
-                <label className="block text-xs font-semibold uppercase tracking-wider text-slate-600 mb-1.5 flex items-center gap-1.5">
-                  <Users className="w-3.5 h-3.5 text-slate-400" />
-                  Reports To
-                  <span className="normal-case font-normal text-slate-400 ml-1">(optional)</span>
-                </label>
-                <div className="relative">
-                  <select
-                    name="manager_id"
-                    value={formData.manager_id}
-                    onChange={handleChange}
-                    disabled={managersLoading}
-                    className="w-full px-3.5 py-2.5 text-sm border border-slate-300 rounded-xl focus:ring-2 focus:ring-indigo-500 focus:outline-none bg-white appearance-none pr-10 disabled:opacity-60"
-                  >
-                    <option value="">
-                      {managersLoading ? 'Loading managers…' : '— No manager selected —'}
-                    </option>
-                    {managers.map((m) => (
-                      <option key={m.id} value={m.id}>
-                        {m.name} · {m.department}
-                      </option>
-                    ))}
-                  </select>
-                  <ChevronDown className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 pointer-events-none" />
-                </div>
-                <p className="mt-1 text-[11px] text-slate-400">
-                  Your manager will be able to view your submitted weekly reports.
+                <span className="font-semibold text-slate-800">Team Assignment</span>
+                <p className="text-[11px] text-slate-500 mt-0.5">
+                  New accounts are created unassigned. Your engineering manager will claim and add you to their team roster.
                 </p>
               </div>
-            )}
+            </div>
 
             {/* Password */}
             <div>

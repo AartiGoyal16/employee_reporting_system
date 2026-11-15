@@ -9,6 +9,7 @@ class Settings(BaseSettings):
     API_V1_STR: str = "/api/v1"
     ENVIRONMENT: str = "development"  # "development", "staging", "production", "test"
     ENABLE_DEMO_USERS: bool = True
+    SEED_DEMO_ACCOUNTS: bool = True
     ENABLE_REMINDER_SCHEDULER: bool = True
     
     # Security

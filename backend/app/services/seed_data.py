@@ -43,8 +43,8 @@ async def seed_database(db):
             await db.questions.insert_one(dict(q))
 
     # 2. Demo users seeding: strictly conditional on environment configuration
-    if not settings.ENABLE_DEMO_USERS or settings.ENVIRONMENT.lower() == "production":
-        logger.info("Demo user seeding is disabled in this environment.")
+    if not settings.SEED_DEMO_ACCOUNTS:
+        logger.info("Demo user seeding is disabled (SEED_DEMO_ACCOUNTS=False).")
         return
 
     # Check if demo users already exist

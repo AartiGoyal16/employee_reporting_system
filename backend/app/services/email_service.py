@@ -15,6 +15,11 @@ from app.config import settings
 logger = logging.getLogger(__name__)
 
 
+def is_smtp_configured() -> bool:
+    """Returns True if SMTP host and user are configured."""
+    return bool(settings.SMTP_HOST and settings.SMTP_USER)
+
+
 def _build_html(subject: str, body_html: str) -> MIMEMultipart:
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
@@ -25,6 +30,12 @@ def _build_html(subject: str, body_html: str) -> MIMEMultipart:
 
 def _send_sync(to_email: str, msg: MIMEMultipart) -> bool:
     """Blocking SMTP send — called in a thread pool so it won't block the event loop."""
+    if not is_smtp_configured():
+        logger.info(
+            f"[EMAIL — log-only] SMTP not configured. Would send '{msg['Subject']}' to {to_email}"
+        )
+        return False
+
     if os.getenv("TESTING") == "1" or settings.ENVIRONMENT.lower() == "test":
         logger.info(f"[TESTING] Simulated sending '{msg['Subject']}' to {to_email}")
         return True
@@ -33,12 +44,6 @@ def _send_sync(to_email: str, msg: MIMEMultipart) -> bool:
     port = settings.SMTP_PORT
     user = settings.SMTP_USER
     password = settings.SMTP_PASSWORD
-
-    if not host or not user:
-        logger.info(
-            f"[EMAIL — log-only] SMTP not configured. Would send '{msg['Subject']}' to {to_email}"
-        )
-        return False
 
     try:
         with smtplib.SMTP(host, port, timeout=10) as server:
